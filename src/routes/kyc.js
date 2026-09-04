@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const axios = require("axios");
 
-const { auth, db } = require("../firebaseAdmin");
+const { auth, db } = require("../../firebaseAdmin");
 
 const router = express.Router();
 
