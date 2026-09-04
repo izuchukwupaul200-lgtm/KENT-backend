@@ -1,1 +1,0 @@
-Get-ChildItem -Recurse -File | Select-String -Pattern "GNEWS_API_KEY|GNEWS"
