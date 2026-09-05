@@ -68,7 +68,11 @@ async function requireAuth(req, res, next) {
   } catch (error) {
     console.error(
       "KENT PAY AUTH ERROR:",
-      error.message
+      {
+        message: error.message,
+        stack: error.stack,
+        name: error.name,
+      }
     );
 
     return res.status(401).json({
@@ -282,15 +286,40 @@ router.get(
         accountName,
       });
     } catch (error) {
+      // ======================================================
+      // IMPORTANT DEBUG ERROR
+      // ======================================================
+      //
+      // We expose the actual error message temporarily so
+      // we can identify exactly why /api/kent-pay/me is
+      // returning HTTP 500.
+      //
+      // ======================================================
+
       console.error(
         "KENT PAY GET ACCOUNT ERROR:",
-        error.message
+        {
+          message: error.message,
+          stack: error.stack,
+          name: error.name,
+
+          uid:
+            req.user?.uid || null,
+        }
       );
 
       return res.status(500).json({
         success: false,
+
         message:
           "Could not load your KENT Pay account.",
+
+        // TEMPORARY DEBUG INFORMATION
+        error:
+          error.message,
+
+        errorName:
+          error.name,
       });
     }
   }
@@ -648,6 +677,12 @@ router.post(
 
           message:
             error.message,
+
+          stack:
+            error.stack,
+
+          name:
+            error.name,
 
           providerStatus:
             error.response?.status || null,
