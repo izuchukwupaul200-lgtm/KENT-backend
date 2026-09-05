@@ -14,14 +14,12 @@ const router = express.Router();
 // KENT PAY ROUTES
 // ============================================================
 //
-// Mounted from server.js as:
+// GET  /api/kent-pay/me
+// POST /api/kent-pay/create-account
+//
+// Mounted in server.js as:
 //
 // app.use("/api/kent-pay", kentPayRouter);
-//
-// Endpoints:
-//
-// POST /api/kent-pay/create-account
-// GET  /api/kent-pay/me
 //
 // ============================================================
 
@@ -108,9 +106,7 @@ function isValidIdentityNumber(value) {
 // HASH ID
 // ============================================================
 //
-// This MUST match the hashing method used in kyc.js.
-//
-// kyc.js uses:
+// MUST match kyc.js:
 //
 // sha256(`${idType}:${idNumber}`)
 //
@@ -125,15 +121,7 @@ function hashIdentity(idType, idNumber) {
 
 
 // ============================================================
-// VERIFY THAT THE PROVIDED ID WAS ALREADY VERIFIED
-// ============================================================
-//
-// We do NOT blindly trust the BVN/NIN supplied to this route.
-//
-// We compare its hash against the verified KYC record already
-// stored in Firestore.
-//
-// Raw BVN/NIN is never saved here.
+// VERIFY PREVIOUSLY VERIFIED IDENTITY
 // ============================================================
 
 function isPreviouslyVerifiedIdentity({
@@ -177,6 +165,14 @@ function isPreviouslyVerifiedIdentity({
 //
 // GET /api/kent-pay/me
 //
+// Returns:
+//
+// - KYC status
+// - KENT Pay activation
+// - virtual account
+// - walletBalance
+// - accountName
+//
 // ============================================================
 
 router.get(
@@ -201,6 +197,10 @@ router.get(
       const userData =
         userSnapshot.data() || {};
 
+      // ======================================================
+      // KYC
+      // ======================================================
+
       const bvnVerified =
         userData.bvnVerified === true;
 
@@ -211,10 +211,56 @@ router.get(
         bvnVerified &&
         ninVerified;
 
+      // ======================================================
+      // WALLET BALANCE
+      // ======================================================
+
+      const rawWalletBalance =
+        userData.walletBalance;
+
+      const walletBalance =
+        typeof rawWalletBalance === "number"
+          ? rawWalletBalance
+          : 0;
+
+      // ======================================================
+      // USER ACCOUNT NAME
+      // ======================================================
+
+      const accountName =
+        cleanString(
+          userData.displayName
+        ) ||
+        cleanString(
+          userData.fullName
+        ) ||
+        cleanString(
+          userData.name
+        ) ||
+        [
+          cleanString(
+            userData.firstName
+          ),
+          cleanString(
+            userData.lastName
+          ),
+        ]
+          .filter(Boolean)
+          .join(" ") ||
+        "Account holder";
+
+      // ======================================================
+      // KENT PAY VIRTUAL ACCOUNT
+      // ======================================================
+
       const kentPayAccount =
         await getKentPayVirtualAccount(
           uid
         );
+
+      // ======================================================
+      // RESPONSE
+      // ======================================================
 
       return res.status(200).json({
         success: true,
@@ -230,6 +276,10 @@ router.get(
 
         kentPayAccount:
           kentPayAccount || null,
+
+        walletBalance,
+
+        accountName,
       });
     } catch (error) {
       console.error(
@@ -264,9 +314,6 @@ router.get(
 // {
 //   "nin": "XXXXXXXXXXX"
 // }
-//
-// The supplied identity number must already have a matching
-// VERIFIED hash in Firestore.
 //
 // ============================================================
 
@@ -325,7 +372,7 @@ router.post(
 
 
       // ======================================================
-      // CHECK IF ACCOUNT ALREADY EXISTS
+      // CHECK EXISTING ACCOUNT
       // ======================================================
 
       const existingAccount =
@@ -358,7 +405,7 @@ router.post(
 
 
       // ======================================================
-      // DETERMINE WHICH VERIFIED ID TO USE
+      // READ SUPPLIED BVN / NIN
       // ======================================================
 
       const suppliedBvn =
@@ -375,9 +422,9 @@ router.post(
       let rawId = null;
 
 
-      // ------------------------------------------------------
-      // Prefer BVN when supplied.
-      // ------------------------------------------------------
+      // ======================================================
+      // BVN
+      // ======================================================
 
       if (suppliedBvn) {
         if (
@@ -392,13 +439,14 @@ router.post(
           });
         }
 
-        if (
-          !isPreviouslyVerifiedIdentity({
+        const verified =
+          isPreviouslyVerifiedIdentity({
             userData,
             idType: "bvn",
             rawId: suppliedBvn,
-          })
-        ) {
+          });
+
+        if (!verified) {
           return res.status(403).json({
             success: false,
             message:
@@ -411,9 +459,9 @@ router.post(
       }
 
 
-      // ------------------------------------------------------
-      // Otherwise use NIN.
-      // ------------------------------------------------------
+      // ======================================================
+      // NIN
+      // ======================================================
 
       if (
         !rawId &&
@@ -431,13 +479,14 @@ router.post(
           });
         }
 
-        if (
-          !isPreviouslyVerifiedIdentity({
+        const verified =
+          isPreviouslyVerifiedIdentity({
             userData,
             idType: "nin",
             rawId: suppliedNin,
-          })
-        ) {
+          });
+
+        if (!verified) {
           return res.status(403).json({
             success: false,
             message:
