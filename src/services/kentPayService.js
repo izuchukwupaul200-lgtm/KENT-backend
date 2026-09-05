@@ -16,6 +16,157 @@ function getUserRef(uid) {
 }
 
 // ============================================================
+// KYC ENCRYPTION
+// ============================================================
+//
+// The real BVN/NIN is sensitive information.
+//
+// We keep the SHA-256 identity hash for comparison/verification,
+// but the actual identity number is stored encrypted.
+//
+// Required Render environment variable:
+//
+// KENT_KYC_ENCRYPTION_KEY
+//
+// It must be exactly 64 hexadecimal characters = 32 bytes.
+//
+// Generate one locally with:
+//
+// node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+//
+// IMPORTANT:
+// Never put this key in Flutter.
+// Never put this key in GitHub.
+// Never log this key.
+// ============================================================
+
+function getKycEncryptionKey() {
+  const key = process.env.KENT_KYC_ENCRYPTION_KEY;
+
+  if (!key) {
+    throw new Error(
+      "KENT_KYC_ENCRYPTION_KEY is missing from the backend environment."
+    );
+  }
+
+  if (!/^[0-9a-fA-F]{64}$/.test(key)) {
+    throw new Error(
+      "KENT_KYC_ENCRYPTION_KEY must contain exactly 64 hexadecimal characters."
+    );
+  }
+
+  return Buffer.from(key, "hex");
+}
+
+// ============================================================
+// DECRYPT SENSITIVE KYC VALUE
+// ============================================================
+//
+// Format:
+//
+// v1:iv:authTag:ciphertext
+//
+// All binary components are base64 encoded.
+// ============================================================
+
+function decryptKycValue(encryptedValue) {
+  if (!encryptedValue) {
+    return null;
+  }
+
+  const value = String(encryptedValue);
+
+  const parts = value.split(":");
+
+  if (parts.length !== 4) {
+    throw new Error("Invalid encrypted KYC value.");
+  }
+
+  const [version, ivBase64, tagBase64, ciphertextBase64] = parts;
+
+  if (version !== "v1") {
+    throw new Error("Unsupported encrypted KYC value version.");
+  }
+
+  const key = getKycEncryptionKey();
+
+  const iv = Buffer.from(ivBase64, "base64");
+  const authTag = Buffer.from(tagBase64, "base64");
+  const ciphertext = Buffer.from(ciphertextBase64, "base64");
+
+  const decipher = crypto.createDecipheriv(
+    "aes-256-gcm",
+    key,
+    iv
+  );
+
+  decipher.setAuthTag(authTag);
+
+  const decrypted = Buffer.concat([
+    decipher.update(ciphertext),
+    decipher.final(),
+  ]);
+
+  return decrypted.toString("utf8");
+}
+
+// ============================================================
+// GET VERIFIED BVN FROM FIRESTORE
+// ============================================================
+//
+// The backend is the only place where the real BVN is recovered.
+//
+// Flutter does NOT send the BVN here.
+//
+// Expected Firestore structure:
+//
+// users/{uid}
+//   bvnVerified: true
+//   bvnVerification:
+//     identityHash: "..."
+//     encryptedIdentity: "v1:..."
+//     verified: true
+//
+// ============================================================
+
+function getStoredVerifiedBvn(userData) {
+  if (!userData) {
+    throw new Error("User data is missing.");
+  }
+
+  const bvnVerified =
+    userData.bvnVerified === true ||
+    userData.bvnVerification?.verified === true;
+
+  if (!bvnVerified) {
+    throw new Error(
+      "Your BVN has not been verified."
+    );
+  }
+
+  const encryptedBvn =
+    userData.bvnVerification?.encryptedIdentity ||
+    userData.bvnEncrypted ||
+    null;
+
+  if (!encryptedBvn) {
+    throw new Error(
+      "Your verified BVN is not available for KENT Pay account creation. Please complete BVN verification again."
+    );
+  }
+
+  const bvn = decryptKycValue(encryptedBvn);
+
+  if (!bvn || !/^\d{11}$/.test(String(bvn).trim())) {
+    throw new Error(
+      "The stored verified BVN is invalid."
+    );
+  }
+
+  return String(bvn).trim();
+}
+
+// ============================================================
 // NORMALIZE NAME
 // ============================================================
 
@@ -74,6 +225,9 @@ function normalizePhone(phone) {
 // ============================================================
 // CREATE STABLE CUSTOMER REFERENCE
 // ============================================================
+//
+// Never put BVN or NIN inside these references.
+// ============================================================
 
 function createCustomerReference(uid) {
   const hash = crypto
@@ -102,42 +256,54 @@ function createVirtualAccountReference(uid) {
 // ============================================================
 // ENSURE KENT PAY VIRTUAL ACCOUNT
 // ============================================================
+//
+// Usage:
+//
+// await ensureKentPayVirtualAccount({
+//   uid
+// });
+//
+// No BVN or NIN is required from Flutter.
+//
+// The backend retrieves the verified BVN from Firestore.
+//
+// For backward compatibility, rawId/idType are still accepted
+// when called directly by the KYC verification process.
+//
+// If rawId is supplied:
+//   - it is used for this request
+//
+// If rawId is NOT supplied:
+//   - verified BVN is recovered from Firestore
+//
+// Flutter should use the first form:
+//
+// ensureKentPayVirtualAccount({ uid })
+//
+// ============================================================
 
 async function ensureKentPayVirtualAccount({
   uid,
   idType,
   rawId,
-}) {
+} = {}) {
+  // ==========================================================
+  // VALIDATE USER
+  // ==========================================================
+
   if (!uid) {
     throw new Error(
       "User ID is required to create a KENT Pay account."
     );
   }
 
-  if (!rawId) {
-    throw new Error(
-      "Verified identity number is required."
-    );
-  }
-
-  if (
-    idType !== "bvn" &&
-    idType !== "nin"
-  ) {
-    throw new Error(
-      "Identity type must be BVN or NIN."
-    );
-  }
-
-  const userRef =
-    getUserRef(uid);
+  const userRef = getUserRef(uid);
 
   // ==========================================================
   // READ USER
   // ==========================================================
 
-  const snapshot =
-    await userRef.get();
+  const snapshot = await userRef.get();
 
   if (!snapshot.exists) {
     throw new Error(
@@ -145,15 +311,14 @@ async function ensureKentPayVirtualAccount({
     );
   }
 
-  const userData =
-    snapshot.data() || {};
+  const userData = snapshot.data() || {};
 
   // ==========================================================
-  // CHECK EXISTING ACCOUNT
+  // ALREADY CREATED
   // ==========================================================
 
   const existing =
-    userData.kentPayAccount;
+    userData.kentPayAccount || null;
 
   if (
     existing &&
@@ -165,6 +330,67 @@ async function ensureKentPayVirtualAccount({
       alreadyExists: true,
       account: existing,
     };
+  }
+
+  // ==========================================================
+  // CHECK FULL KYC
+  // ==========================================================
+
+  const bvnVerified =
+    userData.bvnVerified === true ||
+    userData.bvnVerification?.verified === true;
+
+  const ninVerified =
+    userData.ninVerified === true ||
+    userData.ninVerification?.verified === true;
+
+  if (!bvnVerified || !ninVerified) {
+    throw new Error(
+      "KENT Pay requires both BVN and NIN verification before a virtual account can be created."
+    );
+  }
+
+  // ==========================================================
+  // DETERMINE BVN TO SEND TO FLUTTERWAVE
+  // ==========================================================
+  //
+  // IMPORTANT:
+  //
+  // Flutter does NOT supply this value.
+  //
+  // If the KYC verification process supplies rawId and idType,
+  // we can use that verified value for the current request.
+  //
+  // Otherwise, we recover the encrypted BVN from Firestore.
+  //
+  // For the new "Create your KENT Pay virtual account" button,
+  // this function will be called with ONLY uid.
+  //
+  // Therefore:
+  //
+  // Firestore -> decrypt BVN -> Flutterwave
+  //
+  // ==========================================================
+
+  let bvn = null;
+
+  if (
+    rawId &&
+    String(idType || "").toLowerCase() === "bvn"
+  ) {
+    bvn = String(rawId).trim();
+  } else {
+    bvn = getStoredVerifiedBvn(userData);
+  }
+
+  // ==========================================================
+  // VALIDATE BVN
+  // ==========================================================
+
+  if (!/^\d{11}$/.test(bvn)) {
+    throw new Error(
+      "The verified BVN is invalid."
+    );
   }
 
   // ==========================================================
@@ -182,15 +408,14 @@ async function ensureKentPayVirtualAccount({
     );
   }
 
-  const name =
-    splitName(
-      userData.displayName ||
-        userData.fullName ||
-        userData.name ||
-        `${userData.firstName || ""} ${
-          userData.lastName || ""
-        }`
-    );
+  const name = splitName(
+    userData.displayName ||
+      userData.fullName ||
+      userData.name ||
+      `${userData.firstName || ""} ${
+        userData.lastName || ""
+      }`
+  );
 
   const firstName =
     userData.firstName ||
@@ -218,7 +443,7 @@ async function ensureKentPayVirtualAccount({
     createVirtualAccountReference(uid);
 
   // ==========================================================
-  // CREATE / REUSE FLUTTERWAVE CUSTOMER
+  // CREATE OR REUSE FLUTTERWAVE CUSTOMER
   // ==========================================================
 
   let customerId =
@@ -265,6 +490,16 @@ async function ensureKentPayVirtualAccount({
   // ==========================================================
   // CREATE STATIC VIRTUAL ACCOUNT
   // ==========================================================
+  //
+  // IMPORTANT:
+  //
+  // This is the ONLY point where the real BVN is passed
+  // to the Flutterwave service.
+  //
+  // It never goes to Flutter.
+  // It is never logged.
+  //
+  // ==========================================================
 
   console.log(
     "Creating Flutterwave static virtual account for KENT user:",
@@ -284,23 +519,17 @@ async function ensureKentPayVirtualAccount({
           35
         ),
 
-      bvn:
-        idType === "bvn"
-          ? rawId
-          : undefined,
+      bvn,
 
-      nin:
-        idType === "nin"
-          ? rawId
-          : undefined,
+      nin: undefined,
     });
-
-  // ==========================================================
-  // FLUTTERWAVE RESPONSE
-  // ==========================================================
 
   const accountData =
     virtualAccountResponse?.data;
+
+  // ==========================================================
+  // VALIDATE FLUTTERWAVE RESPONSE
+  // ==========================================================
 
   if (
     !accountData ||
@@ -308,7 +537,11 @@ async function ensureKentPayVirtualAccount({
   ) {
     console.error(
       "INVALID FLUTTERWAVE VIRTUAL ACCOUNT RESPONSE:",
-      virtualAccountResponse
+      {
+        hasData: !!accountData,
+        hasAccountNumber:
+          !!accountData?.account_number,
+      }
     );
 
     throw new Error(
@@ -317,7 +550,7 @@ async function ensureKentPayVirtualAccount({
   }
 
   // ==========================================================
-  // BUILD KENT ACCOUNT
+  // SAVE ACCOUNT
   // ==========================================================
 
   const account = {
@@ -364,7 +597,7 @@ async function ensureKentPayVirtualAccount({
   };
 
   // ==========================================================
-  // SAVE TO FIRESTORE
+  // SAVE ACCOUNT TO FIRESTORE
   // ==========================================================
 
   await userRef.set(
@@ -380,20 +613,31 @@ async function ensureKentPayVirtualAccount({
 
       kentPayActivated:
         true,
+
+      kentPay: {
+        activated: true,
+        activatedAt: new Date(),
+      },
     },
     {
       merge: true,
     }
   );
 
+  // ==========================================================
+  // SUCCESS LOG
+  // ==========================================================
+  //
+  // NEVER log BVN/NIN.
+  //
+  // ==========================================================
+
   console.log(
     "KENT Pay virtual account created successfully:",
     {
       uid,
-
       accountNumber:
         account.accountNumber,
-
       bankName:
         account.bankName,
     }
@@ -401,15 +645,13 @@ async function ensureKentPayVirtualAccount({
 
   return {
     created: true,
-
     alreadyExists: false,
-
     account,
   };
 }
 
 // ============================================================
-// GET EXISTING KENT PAY ACCOUNT
+// GET EXISTING KENT PAY VIRTUAL ACCOUNT
 // ============================================================
 
 async function getKentPayVirtualAccount(uid) {
@@ -436,16 +678,56 @@ async function getKentPayVirtualAccount(uid) {
 }
 
 // ============================================================
-// EXPORTS
+// CHECK KENT PAY ACCOUNT STATUS
 // ============================================================
-//
-// IMPORTANT:
-// Both functions MUST be exported because kentPay.js imports
-// both of them.
-//
+
+async function getKentPayAccountStatus(uid) {
+  if (!uid) {
+    throw new Error(
+      "User ID is required."
+    );
+  }
+
+  const snapshot =
+    await getUserRef(uid).get();
+
+  if (!snapshot.exists) {
+    throw new Error(
+      "KENT user account was not found."
+    );
+  }
+
+  const data =
+    snapshot.data() || {};
+
+  const account =
+    data.kentPayAccount || null;
+
+  return {
+    activated:
+      data.kentPayActivated === true ||
+      data.kentPay?.activated === true,
+
+    accountReady:
+      data.kentPayAccountReady === true,
+
+    hasAccount:
+      !!(
+        account &&
+        account.accountNumber
+      ),
+
+    account,
+  };
+}
+
+// ============================================================
+// EXPORTS
 // ============================================================
 
 module.exports = {
   ensureKentPayVirtualAccount,
   getKentPayVirtualAccount,
+  getKentPayAccountStatus,
+  decryptKycValue,
 };

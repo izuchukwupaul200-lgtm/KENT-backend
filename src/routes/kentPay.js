@@ -1,5 +1,4 @@
 const express = require("express");
-const crypto = require("crypto");
 
 const { auth, db } = require("../../firebaseAdmin");
 
@@ -11,642 +10,338 @@ const {
 const router = express.Router();
 
 // ============================================================
-// KENT PAY ROUTES
-// ============================================================
-//
-// GET  /api/kent-pay/me
-// POST /api/kent-pay/create-account
-//
-// Mounted in server.js as:
-//
-// app.use("/api/kent-pay", kentPayRouter);
-//
-// ============================================================
-
-
-// ============================================================
-// FIRESTORE USER REFERENCE
-// ============================================================
-
-function getUserRef(uid) {
-  return db.collection("users").doc(uid);
-}
-
-
-// ============================================================
-// FIREBASE AUTHENTICATION
+// FIREBASE AUTH MIDDLEWARE
 // ============================================================
 
 async function requireAuth(req, res, next) {
   try {
-    const authorization =
-      req.headers.authorization || "";
+    const authorization = req.headers.authorization || "";
 
     if (!authorization.startsWith("Bearer ")) {
       return res.status(401).json({
         success: false,
-        message: "Authentication required.",
+        message: "Authentication token is required.",
       });
     }
 
-    const idToken =
-      authorization.substring(7).trim();
+    const token = authorization.substring(7).trim();
 
-    if (!idToken) {
+    if (!token) {
       return res.status(401).json({
         success: false,
         message: "Authentication token is missing.",
       });
     }
 
-    const decodedToken =
-      await auth.verifyIdToken(idToken);
+    const decodedToken = await auth.verifyIdToken(token);
 
     req.user = decodedToken;
 
-    return next();
+    next();
   } catch (error) {
-    console.error(
-      "KENT PAY AUTH ERROR:",
-      {
-        message: error.message,
-        stack: error.stack,
-        name: error.name,
-      }
-    );
+    console.error("KENT AUTH ERROR:", error.message);
 
     return res.status(401).json({
       success: false,
-      message:
-        "Your login session is invalid or expired.",
+      message: "Invalid or expired authentication token.",
     });
   }
 }
 
-
-// ============================================================
-// CLEAN STRING
-// ============================================================
-
-function cleanString(value) {
-  if (typeof value !== "string") {
-    return "";
-  }
-
-  return value.trim();
-}
-
-
-// ============================================================
-// VALIDATE BVN / NIN
-// ============================================================
-
-function isValidIdentityNumber(value) {
-  return /^\d{11}$/.test(value);
-}
-
-
-// ============================================================
-// HASH ID
-// ============================================================
-//
-// MUST match kyc.js:
-//
-// sha256(`${idType}:${idNumber}`)
-//
-// ============================================================
-
-function hashIdentity(idType, idNumber) {
-  return crypto
-    .createHash("sha256")
-    .update(`${idType}:${idNumber}`)
-    .digest("hex");
-}
-
-
-// ============================================================
-// VERIFY PREVIOUSLY VERIFIED IDENTITY
-// ============================================================
-
-function isPreviouslyVerifiedIdentity({
-  userData,
-  idType,
-  rawId,
-}) {
-  const identityHash =
-    hashIdentity(
-      idType,
-      rawId
-    );
-
-  const verification =
-    idType === "bvn"
-      ? userData.bvnVerification
-      : userData.ninVerification;
-
-  if (!verification) {
-    return false;
-  }
-
-  if (verification.verified !== true) {
-    return false;
-  }
-
-  if (
-    verification.identityHash !==
-    identityHash
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-
 // ============================================================
 // GET KENT PAY ACCOUNT
 // ============================================================
-//
-// GET /api/kent-pay/me
-//
-// Returns:
-//
-// - KYC status
-// - KENT Pay activation
-// - virtual account
-// - walletBalance
-// - accountName
-//
-// ============================================================
 
-router.get(
-  "/me",
-  requireAuth,
-  async (req, res) => {
-    try {
-      const uid =
-        req.user.uid;
+router.get("/me", requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.uid;
 
-      const userSnapshot =
-        await getUserRef(uid).get();
+    const userSnapshot = await db
+      .collection("users")
+      .doc(uid)
+      .get();
 
-      if (!userSnapshot.exists) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "KENT user account was not found.",
-        });
-      }
-
-      const userData =
-        userSnapshot.data() || {};
-
-      // ======================================================
-      // KYC
-      // ======================================================
-
-      const bvnVerified =
-        userData.bvnVerified === true;
-
-      const ninVerified =
-        userData.ninVerified === true;
-
-      const kentPayActivated =
-        bvnVerified &&
-        ninVerified;
-
-      // ======================================================
-      // WALLET BALANCE
-      // ======================================================
-
-      const rawWalletBalance =
-        userData.walletBalance;
-
-      const walletBalance =
-        typeof rawWalletBalance === "number"
-          ? rawWalletBalance
-          : 0;
-
-      // ======================================================
-      // USER ACCOUNT NAME
-      // ======================================================
-
-      const accountName =
-        cleanString(
-          userData.displayName
-        ) ||
-        cleanString(
-          userData.fullName
-        ) ||
-        cleanString(
-          userData.name
-        ) ||
-        [
-          cleanString(
-            userData.firstName
-          ),
-          cleanString(
-            userData.lastName
-          ),
-        ]
-          .filter(Boolean)
-          .join(" ") ||
-        "Account holder";
-
-      // ======================================================
-      // KENT PAY VIRTUAL ACCOUNT
-      // ======================================================
-
-      const kentPayAccount =
-        await getKentPayVirtualAccount(
-          uid
-        );
-
-      // ======================================================
-      // RESPONSE
-      // ======================================================
-
-      return res.status(200).json({
-        success: true,
-
-        bvnVerified,
-
-        ninVerified,
-
-        kentPayActivated,
-
-        kentPayAccountReady:
-          !!kentPayAccount,
-
-        kentPayAccount:
-          kentPayAccount || null,
-
-        walletBalance,
-
-        accountName,
-      });
-    } catch (error) {
-      // ======================================================
-      // IMPORTANT DEBUG ERROR
-      // ======================================================
-      //
-      // We expose the actual error message temporarily so
-      // we can identify exactly why /api/kent-pay/me is
-      // returning HTTP 500.
-      //
-      // ======================================================
-
-      console.error(
-        "KENT PAY GET ACCOUNT ERROR:",
-        {
-          message: error.message,
-          stack: error.stack,
-          name: error.name,
-
-          uid:
-            req.user?.uid || null,
-        }
-      );
-
-      return res.status(500).json({
+    if (!userSnapshot.exists) {
+      return res.status(404).json({
         success: false,
-
-        message:
-          "Could not load your KENT Pay account.",
-
-        // TEMPORARY DEBUG INFORMATION
-        error:
-          error.message,
-
-        errorName:
-          error.name,
+        message: "KENT user account was not found.",
       });
     }
-  }
-);
 
+    const userData = userSnapshot.data() || {};
+
+    const kentPayAccount =
+      userData.kentPayAccount || null;
+
+    const bvnVerified =
+      userData.bvnVerified === true ||
+      userData.bvnVerification?.verified === true;
+
+    const ninVerified =
+      userData.ninVerified === true ||
+      userData.ninVerification?.verified === true;
+
+    const kentPayActivated =
+      userData.kentPayActivated === true ||
+      userData.kentPay?.activated === true;
+
+    const kentPayAccountReady =
+      userData.kentPayAccountReady === true ||
+      !!(
+        kentPayAccount &&
+        kentPayAccount.accountNumber
+      );
+
+    return res.status(200).json({
+      success: true,
+
+      bvnVerified,
+      ninVerified,
+
+      kentPayActivated,
+
+      kentPayAccountReady,
+
+      kentPayAccount,
+
+      walletBalance:
+        typeof userData.walletBalance === "number"
+          ? userData.walletBalance
+          : 0,
+
+      accountName:
+        userData.displayName ||
+        userData.fullName ||
+        userData.name ||
+        `${userData.firstName || ""} ${
+          userData.lastName || ""
+        }`.trim() ||
+        "KENT User",
+    });
+  } catch (error) {
+    console.error(
+      "KENT PAY GET ACCOUNT ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to load KENT Pay account.",
+    });
+  }
+});
 
 // ============================================================
 // CREATE KENT PAY VIRTUAL ACCOUNT
-// ============================================================
 //
-// POST /api/kent-pay/create-account
+// IMPORTANT:
+// Flutter does NOT send BVN or NIN here.
 //
-// Body:
+// The authenticated Firebase UID identifies the user.
+// The backend verifies KYC status and kentPayService.js
+// retrieves the encrypted BVN from Firestore.
 //
-// {
-//   "bvn": "XXXXXXXXXXX"
-// }
-//
-// OR:
-//
-// {
-//   "nin": "XXXXXXXXXXX"
-// }
-//
+// NEVER trust a BVN/NIN supplied by the Flutter app.
 // ============================================================
 
 router.post(
   "/create-account",
   requireAuth,
   async (req, res) => {
-    const uid =
-      req.user.uid;
-
     try {
-      // ======================================================
-      // READ USER
-      // ======================================================
+      const uid = req.user.uid;
 
-      const userSnapshot =
-        await getUserRef(uid).get();
+      console.log(
+        "KENT CREATE ACCOUNT REQUEST:",
+        {
+          uid,
+        }
+      );
+
+      // --------------------------------------------------------
+      // LOAD USER
+      // --------------------------------------------------------
+
+      const userRef = db
+        .collection("users")
+        .doc(uid);
+
+      const userSnapshot = await userRef.get();
 
       if (!userSnapshot.exists) {
         return res.status(404).json({
           success: false,
-          message:
-            "KENT user account was not found.",
+          message: "KENT user account was not found.",
         });
       }
 
       const userData =
         userSnapshot.data() || {};
 
-
-      // ======================================================
-      // CHECK KYC
-      // ======================================================
+      // --------------------------------------------------------
+      // CHECK BVN
+      // --------------------------------------------------------
 
       const bvnVerified =
-        userData.bvnVerified === true;
+        userData.bvnVerified === true ||
+        userData.bvnVerification?.verified === true;
 
-      const ninVerified =
-        userData.ninVerified === true;
-
-      if (
-        !bvnVerified ||
-        !ninVerified
-      ) {
+      if (!bvnVerified) {
         return res.status(403).json({
           success: false,
-
-          kentPayActivated: false,
-
-          kentPayAccountReady: false,
-
           message:
-            "Complete BVN and NIN verification before creating your KENT Pay account.",
+            "Your BVN must be verified before creating a KENT Pay account.",
         });
       }
 
+      // --------------------------------------------------------
+      // CHECK NIN
+      // --------------------------------------------------------
 
-      // ======================================================
-      // CHECK EXISTING ACCOUNT
-      // ======================================================
+      const ninVerified =
+        userData.ninVerified === true ||
+        userData.ninVerification?.verified === true;
+
+      if (!ninVerified) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Your NIN must be verified before creating a KENT Pay account.",
+        });
+      }
+
+      // --------------------------------------------------------
+      // CHECK IF ACCOUNT ALREADY EXISTS
+      // --------------------------------------------------------
 
       const existingAccount =
-        await getKentPayVirtualAccount(
-          uid
-        );
+        userData.kentPayAccount || null;
 
       if (
         existingAccount &&
         existingAccount.accountNumber
       ) {
+        console.log(
+          "KENT PAY ACCOUNT ALREADY EXISTS:",
+          {
+            uid,
+            accountNumber:
+              existingAccount.accountNumber,
+            bankName:
+              existingAccount.bankName,
+          }
+        );
+
         return res.status(200).json({
           success: true,
-
           created: false,
-
           alreadyExists: true,
 
-          kentPayActivated: true,
+          bvnVerified: true,
+          ninVerified: true,
+
+          kentPayActivated:
+            userData.kentPayActivated === true ||
+            userData.kentPay?.activated === true,
 
           kentPayAccountReady: true,
 
           kentPayAccount:
             existingAccount,
 
-          message:
-            "Your KENT Pay virtual account already exists.",
+          account:
+            existingAccount,
+
+          walletBalance:
+            typeof userData.walletBalance ===
+            "number"
+              ? userData.walletBalance
+              : 0,
         });
       }
 
-
-      // ======================================================
-      // READ SUPPLIED BVN / NIN
-      // ======================================================
-
-      const suppliedBvn =
-        cleanString(
-          req.body?.bvn
-        );
-
-      const suppliedNin =
-        cleanString(
-          req.body?.nin
-        );
-
-      let idType = null;
-      let rawId = null;
-
-
-      // ======================================================
-      // BVN
-      // ======================================================
-
-      if (suppliedBvn) {
-        if (
-          !isValidIdentityNumber(
-            suppliedBvn
-          )
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "BVN must contain exactly 11 digits.",
-          });
-        }
-
-        const verified =
-          isPreviouslyVerifiedIdentity({
-            userData,
-            idType: "bvn",
-            rawId: suppliedBvn,
-          });
-
-        if (!verified) {
-          return res.status(403).json({
-            success: false,
-            message:
-              "The supplied BVN does not match the BVN that was previously verified.",
-          });
-        }
-
-        idType = "bvn";
-        rawId = suppliedBvn;
-      }
-
-
-      // ======================================================
-      // NIN
-      // ======================================================
-
-      if (
-        !rawId &&
-        suppliedNin
-      ) {
-        if (
-          !isValidIdentityNumber(
-            suppliedNin
-          )
-        ) {
-          return res.status(400).json({
-            success: false,
-            message:
-              "NIN must contain exactly 11 digits.",
-          });
-        }
-
-        const verified =
-          isPreviouslyVerifiedIdentity({
-            userData,
-            idType: "nin",
-            rawId: suppliedNin,
-          });
-
-        if (!verified) {
-          return res.status(403).json({
-            success: false,
-            message:
-              "The supplied NIN does not match the NIN that was previously verified.",
-          });
-        }
-
-        idType = "nin";
-        rawId = suppliedNin;
-      }
-
-
-      // ======================================================
-      // NO ID PROVIDED
-      // ======================================================
-
-      if (!idType || !rawId) {
-        return res.status(400).json({
-          success: false,
-
-          message:
-            "Provide the BVN or NIN that was previously verified.",
-        });
-      }
-
-
-      // ======================================================
-      // CREATE FLUTTERWAVE ACCOUNT
-      // ======================================================
+      // --------------------------------------------------------
+      // CREATE ACCOUNT
+      //
+      // NO BVN/NIN FROM CLIENT
+      //
+      // kentPayService.js will:
+      //
+      // 1. Load the user
+      // 2. Retrieve encrypted verified BVN
+      // 3. Decrypt BVN on the backend
+      // 4. Create Flutterwave customer
+      // 5. Create static virtual account
+      // 6. Save account to Firestore
+      //
+      // --------------------------------------------------------
 
       console.log(
-        "KENT PAY ACCOUNT CREATION STARTED:",
+        "KENT CREATING VIRTUAL ACCOUNT:",
         {
           uid,
-          idType,
+          bvnVerified,
+          ninVerified,
         }
       );
 
-      const accountResult =
+      const result =
         await ensureKentPayVirtualAccount({
           uid,
-
-          idType,
-
-          rawId,
         });
 
+      // --------------------------------------------------------
+      // LOAD UPDATED USER
+      // --------------------------------------------------------
 
-      // ======================================================
-      // CHECK RESULT
-      // ======================================================
+      const updatedSnapshot =
+        await userRef.get();
 
-      if (
-        !accountResult ||
-        !accountResult.account
-      ) {
-        console.error(
-          "KENT PAY ACCOUNT CREATION RETURNED NO ACCOUNT:",
-          {
-            uid,
-            idType,
-          }
-        );
-
-        return res.status(502).json({
-          success: false,
-
-          kentPayActivated: true,
-
-          kentPayAccountReady: false,
-
-          message:
-            "KENT Pay is activated, but Flutterwave did not return a virtual account. Please try again.",
-        });
-      }
-
-
-      // ======================================================
-      // VERIFY ACCOUNT NUMBER
-      // ======================================================
+      const updatedData =
+        updatedSnapshot.exists
+          ? updatedSnapshot.data() || {}
+          : {};
 
       const account =
-        accountResult.account;
+        result?.account ||
+        updatedData.kentPayAccount ||
+        null;
+
+      // --------------------------------------------------------
+      // SAFETY CHECK
+      // --------------------------------------------------------
 
       if (
+        !account ||
         !account.accountNumber
       ) {
         console.error(
-          "KENT PAY ACCOUNT HAS NO ACCOUNT NUMBER:",
+          "KENT ACCOUNT CREATION RETURNED NO ACCOUNT:",
           {
             uid,
-            idType,
-
-            provider:
-              account.provider || null,
-
-            reference:
-              account.reference || null,
+            result,
           }
         );
 
-        return res.status(502).json({
+        return res.status(500).json({
           success: false,
-
-          kentPayActivated: true,
-
-          kentPayAccountReady: false,
-
           message:
-            "Flutterwave did not return an account number. Please try again.",
+            "KENT Pay account creation did not return a valid virtual account.",
         });
       }
 
-
-      // ======================================================
+      // --------------------------------------------------------
       // SUCCESS
-      // ======================================================
+      // --------------------------------------------------------
 
       console.log(
-        "KENT PAY ACCOUNT CREATED:",
+        "KENT PAY ACCOUNT READY:",
         {
           uid,
-
           accountNumber:
             account.accountNumber,
-
           bankName:
             account.bankName,
-
-          accountName:
-            account.accountName,
         }
       );
 
@@ -654,80 +349,108 @@ router.post(
         success: true,
 
         created:
-          accountResult.created === true,
+          result?.created === true,
 
         alreadyExists:
-          accountResult.alreadyExists === true,
+          result?.alreadyExists === true,
 
-        kentPayActivated: true,
+        bvnVerified: true,
+        ninVerified: true,
+
+        kentPayActivated:
+          updatedData.kentPayActivated === true ||
+          updatedData.kentPay?.activated === true,
 
         kentPayAccountReady: true,
 
         kentPayAccount:
           account,
 
-        message:
-          "Your KENT Pay virtual account has been created successfully.",
+        account,
+
+        walletBalance:
+          typeof updatedData.walletBalance ===
+          "number"
+            ? updatedData.walletBalance
+            : 0,
       });
     } catch (error) {
       console.error(
-        "KENT PAY CREATE ACCOUNT ERROR:",
-        {
-          uid,
-
-          message:
-            error.message,
-
-          stack:
-            error.stack,
-
-          name:
-            error.name,
-
-          providerStatus:
-            error.response?.status || null,
-
-          providerData:
-            error.response?.data || null,
-        }
+        "KENT CREATE ACCOUNT ERROR:",
+        error
       );
+
+      let safeMessage =
+        "Unable to create your KENT Pay account.";
+
+      if (
+        error &&
+        typeof error.message === "string"
+      ) {
+        const message =
+          error.message.trim();
+
+        if (
+          message ===
+            "Your BVN has not been verified." ||
+          message ===
+            "Your verified BVN is not available for KENT Pay account creation. Please complete BVN verification again." ||
+          message ===
+            "The stored verified BVN is invalid." ||
+          message ===
+            "A verified email address is required before creating the KENT Pay account."
+        ) {
+          safeMessage = message;
+        }
+      }
 
       return res.status(500).json({
         success: false,
-
-        kentPayActivated: true,
-
-        kentPayAccountReady: false,
-
-        message:
-          "We could not create your KENT Pay virtual account right now. Please try again.",
+        message: safeMessage,
       });
     }
   }
 );
 
-
 // ============================================================
-// ROUTE NOT FOUND
+// GET ONLY THE VIRTUAL ACCOUNT
 // ============================================================
 
-router.use(
-  (req, res) => {
-    return res.status(404).json({
-      success: false,
+router.get(
+  "/account",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const uid = req.user.uid;
 
-      message:
-        "KENT Pay endpoint not found.",
+      const account =
+        await getKentPayVirtualAccount(uid);
 
-      path:
-        req.originalUrl,
-    });
+      if (!account) {
+        return res.status(404).json({
+          success: false,
+          message:
+            "KENT Pay virtual account has not been created yet.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        account,
+      });
+    } catch (error) {
+      console.error(
+        "KENT GET VIRTUAL ACCOUNT ERROR:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Unable to retrieve KENT Pay virtual account.",
+      });
+    }
   }
 );
-
-
-// ============================================================
-// EXPORT
-// ============================================================
 
 module.exports = router;
