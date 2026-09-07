@@ -1329,6 +1329,102 @@ async function verifyIdentity(
           uid
         );
 
+      // ======================================================
+      // BACKFILL MISSING ENCRYPTED IDENTITY
+      // ======================================================
+      //
+      // Some users were verified before encryptedIdentity
+      // was added to their Firestore KYC record.
+      //
+      // Their record contains:
+      //
+      //   identityHash
+      //   verified: true
+      //
+      // but does not contain:
+      //
+      //   encryptedIdentity
+      //
+      // DO NOT call Ninja again.
+      //
+      // This request is authenticated and the submitted
+      // identity number has already been confirmed against
+      // the stored identityHash by checkRecentVerification().
+      //
+      // We securely encrypt the supplied identity number and
+      // save it to Firestore.
+      //
+      // Plaintext BVN/NIN is NEVER stored.
+      // Plaintext BVN/NIN is NEVER logged.
+      // ======================================================
+
+      const verificationField =
+        idType === "bvn"
+          ? "bvnVerification"
+          : "ninVerification";
+
+      const previousVerification =
+        userData[
+          verificationField
+        ] || {};
+
+      if (
+        previousVerification.verified === true &&
+        !previousVerification.encryptedIdentity
+      ) {
+        if (
+          !isElevenDigits(
+            rawId
+          )
+        ) {
+          return res.status(400).json({
+            success: false,
+
+            verified: true,
+
+            alreadyVerified: true,
+
+            message:
+              `Your verified ${idType.toUpperCase()} record is missing its secure identity value. Please enter the same ${idType.toUpperCase()} number again.`,
+          });
+        }
+
+        const encryptedIdentity =
+          encryptKycValue(
+            rawId
+          );
+
+        await getUserRef(
+          uid
+        ).set(
+          {
+            [verificationField]: {
+              ...previousVerification,
+
+              encryptedIdentity,
+            },
+          },
+          {
+            merge: true,
+          }
+        );
+
+        userData[
+          verificationField
+        ] = {
+          ...previousVerification,
+
+          encryptedIdentity,
+        };
+
+        console.log(
+          `KENT KYC: Missing encrypted ${idType.toUpperCase()} value was securely backfilled for the existing verified record.`,
+          {
+            uid,
+          }
+        );
+      }
+
       let kentPayAccount =
         await getKentPayVirtualAccount(
           uid

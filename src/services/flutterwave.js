@@ -10,11 +10,12 @@ const axios = require("axios");
 // OAuth:
 // https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token
 //
-// Required environment variables:
+// REQUIRED ENVIRONMENT VARIABLES:
 //
 // FLW_CLIENT_ID
 // FLW_CLIENT_SECRET
 // FLW_BASE_URL=https://f4bexperience.flutterwave.com
+// FLW_TRANSFER_WEBHOOK_URL=YOUR_WEBHOOK_URL
 //
 // NEVER put Flutterwave credentials in this file.
 // NEVER expose them to Flutter/Android.
@@ -37,6 +38,9 @@ const FLW_BASE_URL = (
 
 const FLW_OAUTH_URL =
   "https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token";
+
+const FLW_TRANSFER_WEBHOOK_URL =
+  process.env.FLW_TRANSFER_WEBHOOK_URL || "";
 
 // ============================================================
 // SETTINGS
@@ -92,12 +96,6 @@ function validateConfiguration() {
 // ============================================================
 // GET FLUTTERWAVE OAUTH ACCESS TOKEN
 // ============================================================
-//
-// Flutterwave OAuth tokens currently expire after
-// approximately 10 minutes.
-//
-// We refresh one minute before expiry.
-// ============================================================
 
 async function getFlutterwaveAccessToken(
   forceRefresh = false
@@ -107,7 +105,6 @@ async function getFlutterwaveAccessToken(
   const now =
     Date.now();
 
-  // Reuse valid cached token.
   if (
     !forceRefresh &&
     accessToken &&
@@ -201,10 +198,6 @@ async function getFlutterwaveAccessToken(
 // ============================================================
 // GENERATE TRACE ID
 // ============================================================
-//
-// Flutterwave requires X-Trace-Id to be a unique value
-// between 12 and 255 characters.
-// ============================================================
 
 function generateTraceId(
   prefix = "kent"
@@ -216,15 +209,6 @@ function generateTraceId(
 
 // ============================================================
 // GENERATE IDEMPOTENCY KEY
-// ============================================================
-//
-// Flutterwave requires an idempotency key to prevent
-// accidental duplicate POST operations.
-//
-// For account creation we will supply a stable key based
-// on the KENT virtual-account reference.
-//
-// For other operations this function can generate one.
 // ============================================================
 
 function generateIdempotencyKey(
@@ -268,7 +252,8 @@ async function flutterwaveRequest({
   if (idempotencyKey) {
     headers[
       "X-Idempotency-Key"
-    ] = idempotencyKey;
+    ] =
+      idempotencyKey;
   }
 
   try {
@@ -286,10 +271,6 @@ async function flutterwaveRequest({
         REQUEST_TIMEOUT_MS,
     });
   } catch (error) {
-    // ========================================================
-    // TOKEN EXPIRED
-    // ========================================================
-
     if (
       retryOn401 &&
       error.response?.status === 401
@@ -328,13 +309,6 @@ async function flutterwaveRequest({
 // ============================================================
 // CREATE FLUTTERWAVE CUSTOMER
 // ============================================================
-//
-// Current v4 flow:
-//
-// 1. Create customer.
-// 2. Receive customer_id.
-// 3. Use customer_id to create static virtual account.
-// ============================================================
 
 async function createFlutterwaveCustomer({
   email,
@@ -370,10 +344,6 @@ async function createFlutterwaveCustomer({
     );
   }
 
-  // ----------------------------------------------------------
-  // CUSTOMER PAYLOAD
-  // ----------------------------------------------------------
-
   const payload = {
     name: {
       first:
@@ -387,18 +357,11 @@ async function createFlutterwaveCustomer({
       email.trim(),
   };
 
-  // ----------------------------------------------------------
-  // PHONE
-  // ----------------------------------------------------------
-
-  if (
-    phoneNumber
-  ) {
+  if (phoneNumber) {
     let phone =
       String(phoneNumber)
         .trim();
 
-    // Convert Nigerian formats to local number.
     if (
       phone.startsWith("+234")
     ) {
@@ -427,19 +390,11 @@ async function createFlutterwaveCustomer({
     }
   }
 
-  // ----------------------------------------------------------
-  // IDEMPOTENCY
-  // ----------------------------------------------------------
-
   const finalIdempotencyKey =
     idempotencyKey ||
     generateIdempotencyKey(
       "kent-customer"
     );
-
-  // ----------------------------------------------------------
-  // REQUEST
-  // ----------------------------------------------------------
 
   try {
     const response =
@@ -466,7 +421,6 @@ async function createFlutterwaveCustomer({
   } catch (error) {
     console.error(
       "FLUTTERWAVE CUSTOMER CREATION ERROR:",
-
       error.response?.data ||
         error.message
     );
@@ -478,18 +432,6 @@ async function createFlutterwaveCustomer({
 // ============================================================
 // CREATE STATIC VIRTUAL ACCOUNT
 // ============================================================
-//
-// Current v4 static NGN account:
-//
-// amount = 0
-// account_type = static
-// currency = NGN
-// customer_id required
-// BVN or NIN required
-//
-// Flutterwave's current documentation shows bank code
-// 090567 for Flutterwave MFB when specifying the NGN bank.
-// ============================================================
 
 async function createStaticVirtualAccount({
   customerId,
@@ -499,10 +441,6 @@ async function createStaticVirtualAccount({
   nin,
   bankCode,
 }) {
-  // ----------------------------------------------------------
-  // CUSTOMER ID
-  // ----------------------------------------------------------
-
   if (
     !customerId ||
     typeof customerId !== "string"
@@ -511,10 +449,6 @@ async function createStaticVirtualAccount({
       "Flutterwave customer ID is required."
     );
   }
-
-  // ----------------------------------------------------------
-  // REFERENCE
-  // ----------------------------------------------------------
 
   if (
     !reference ||
@@ -525,8 +459,6 @@ async function createStaticVirtualAccount({
     );
   }
 
-  // Flutterwave reference:
-  // 6-42 characters, letters/numbers/hyphens.
   if (
     reference.length < 6 ||
     reference.length > 42 ||
@@ -539,10 +471,6 @@ async function createStaticVirtualAccount({
     );
   }
 
-  // ----------------------------------------------------------
-  // BVN OR NIN
-  // ----------------------------------------------------------
-
   if (
     !bvn &&
     !nin
@@ -551,10 +479,6 @@ async function createStaticVirtualAccount({
       "A verified BVN or NIN is required to create the static NGN virtual account."
     );
   }
-
-  // ----------------------------------------------------------
-  // PAYLOAD
-  // ----------------------------------------------------------
 
   const payload = {
     reference,
@@ -575,15 +499,10 @@ async function createStaticVirtualAccount({
       narration ||
       "KENT Pay",
 
-    // Flutterwave MFB.
     bank_code:
       bankCode ||
       "090567",
   };
-
-  // ----------------------------------------------------------
-  // IDENTITY
-  // ----------------------------------------------------------
 
   if (bvn) {
     payload.bvn =
@@ -595,24 +514,8 @@ async function createStaticVirtualAccount({
       String(nin).trim();
   }
 
-  // ----------------------------------------------------------
-  // IDEMPOTENCY
-  // ----------------------------------------------------------
-  //
-  // IMPORTANT:
-  // The same reference always produces the same
-  // idempotency key.
-  //
-  // This prevents KENT from deliberately creating
-  // another account when the same operation is retried.
-  // ----------------------------------------------------------
-
   const idempotencyKey =
     `kent-account-${reference}`;
-
-  // ----------------------------------------------------------
-  // REQUEST
-  // ----------------------------------------------------------
 
   try {
     const response =
@@ -648,6 +551,360 @@ async function createStaticVirtualAccount({
 }
 
 // ============================================================
+// GET NIGERIAN BANKS
+// ============================================================
+//
+// GET /banks?country=NG
+//
+// Flutterwave V4 returns:
+//
+// {
+//   "status": "success",
+//   "message": "...",
+//   "data": [
+//     {
+//       "id": "bnk_...",
+//       "code": "044",
+//       "name": "Access Bank"
+//     }
+//   ]
+// }
+//
+// IMPORTANT:
+// This function returns ONLY the bank array.
+// transferService.js expects an array.
+// ============================================================
+
+async function getNigerianBanks() {
+  try {
+    const response =
+      await flutterwaveRequest({
+        method:
+          "GET",
+
+        path:
+          "/banks?country=NG",
+
+        traceId:
+          generateTraceId(
+            "kent-banks"
+          ),
+      });
+
+    const responseBody =
+      response?.data;
+
+    const banks =
+      responseBody?.data;
+
+    if (
+      !Array.isArray(banks)
+    ) {
+      console.error(
+        "FLUTTERWAVE BANK LIST INVALID RESPONSE:",
+        responseBody
+      );
+
+      return [];
+    }
+
+    return banks;
+  } catch (error) {
+    console.error(
+      "FLUTTERWAVE BANK LIST ERROR:",
+      error.response?.data ||
+        error.message
+    );
+
+    throw error;
+  }
+}
+
+// ============================================================
+// RESOLVE NIGERIAN BANK ACCOUNT
+// ============================================================
+//
+// POST /banks/account-resolve
+// ============================================================
+
+async function resolveNigerianBankAccount({
+  bankCode,
+  accountNumber,
+}) {
+  const cleanBankCode =
+    String(
+      bankCode || ""
+    ).trim();
+
+  const cleanAccountNumber =
+    String(
+      accountNumber || ""
+    ).trim();
+
+  if (
+    !/^\d{3}$/.test(
+      cleanBankCode
+    )
+  ) {
+    throw new Error(
+      "Invalid Nigerian bank code."
+    );
+  }
+
+  if (
+    !/^\d{10}$/.test(
+      cleanAccountNumber
+    )
+  ) {
+    throw new Error(
+      "Nigerian bank account number must contain 10 digits."
+    );
+  }
+
+  try {
+    const response =
+      await flutterwaveRequest({
+        method:
+          "POST",
+
+        path:
+          "/banks/account-resolve",
+
+        data: {
+          account: {
+            code:
+              cleanBankCode,
+
+            number:
+              cleanAccountNumber,
+          },
+
+          currency:
+            "NGN",
+        },
+
+        traceId:
+          generateTraceId(
+            "kent-resolve"
+          ),
+      });
+
+    return response.data;
+  } catch (error) {
+    console.error(
+      "FLUTTERWAVE ACCOUNT RESOLVE ERROR:",
+      error.response?.data ||
+        error.message
+    );
+
+    throw error;
+  }
+}
+
+// ============================================================
+// CREATE DIRECT BANK TRANSFER
+// ============================================================
+//
+// POST /direct-transfers
+//
+// Flutterwave v4 direct transfer flow.
+// ============================================================
+
+async function createDirectBankTransfer({
+  reference,
+  amount,
+  bankCode,
+  accountNumber,
+  narration,
+}) {
+  if (
+    !reference ||
+    typeof reference !== "string"
+  ) {
+    throw new Error(
+      "Transfer reference is required."
+    );
+  }
+
+  if (
+    reference.length < 6 ||
+    reference.length > 42 ||
+    !/^[a-zA-Z0-9-]+$/.test(
+      reference
+    )
+  ) {
+    throw new Error(
+      "Transfer reference must contain 6-42 letters, numbers, or hyphens."
+    );
+  }
+
+  const numericAmount =
+    Number(amount);
+
+  if (
+    !Number.isFinite(
+      numericAmount
+    ) ||
+    numericAmount <= 0
+  ) {
+    throw new Error(
+      "Transfer amount must be greater than zero."
+    );
+  }
+
+  if (
+    !/^\d{3}$/.test(
+      String(bankCode || "")
+    )
+  ) {
+    throw new Error(
+      "Invalid Nigerian bank code."
+    );
+  }
+
+  if (
+    !/^\d{10}$/.test(
+      String(accountNumber || "")
+    )
+  ) {
+    throw new Error(
+      "Nigerian bank account number must contain 10 digits."
+    );
+  }
+
+  const payload = {
+    action:
+      "instant",
+
+    type:
+      "bank",
+
+    reference,
+
+    narration:
+      narration ||
+      "KENT Pay transfer",
+
+    payment_instruction: {
+      source_currency:
+        "NGN",
+
+      amount: {
+        applies_to:
+          "destination_currency",
+
+        value:
+          numericAmount,
+      },
+
+      recipient: {
+        bank: {
+          account_number:
+            String(
+              accountNumber
+            ),
+
+          code:
+            String(
+              bankCode
+            ),
+        },
+      },
+
+      destination_currency:
+        "NGN",
+    },
+  };
+
+  if (
+    FLW_TRANSFER_WEBHOOK_URL
+  ) {
+    payload.callback_url =
+      FLW_TRANSFER_WEBHOOK_URL;
+  }
+
+  const idempotencyKey =
+    `kent-transfer-${reference}`;
+
+  try {
+    const response =
+      await flutterwaveRequest({
+        method:
+          "POST",
+
+        path:
+          "/direct-transfers",
+
+        data:
+          payload,
+
+        idempotencyKey,
+
+        traceId:
+          generateTraceId(
+            "kent-transfer"
+          ),
+      });
+
+    return response.data;
+  } catch (error) {
+    console.error(
+      "FLUTTERWAVE DIRECT TRANSFER ERROR:",
+
+      error.response?.data ||
+        error.message
+    );
+
+    throw error;
+  }
+}
+
+// ============================================================
+// GET DIRECT TRANSFER STATUS
+// ============================================================
+
+async function getDirectTransferStatus(
+  transferId
+) {
+  if (
+    !transferId
+  ) {
+    throw new Error(
+      "Flutterwave transfer ID is required."
+    );
+  }
+
+  try {
+    const response =
+      await flutterwaveRequest({
+        method:
+          "GET",
+
+        path:
+          `/transfers/${encodeURIComponent(
+            transferId
+          )}`,
+
+        traceId:
+          generateTraceId(
+            "kent-transfer-status"
+          ),
+      });
+
+    return response.data;
+  } catch (error) {
+    console.error(
+      "FLUTTERWAVE TRANSFER STATUS ERROR:",
+
+      error.response?.data ||
+        error.message
+    );
+
+    throw error;
+  }
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -659,4 +916,12 @@ module.exports = {
   createFlutterwaveCustomer,
 
   createStaticVirtualAccount,
+
+  getNigerianBanks,
+
+  resolveNigerianBankAccount,
+
+  createDirectBankTransfer,
+
+  getDirectTransferStatus,
 };
