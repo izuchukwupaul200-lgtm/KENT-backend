@@ -57,7 +57,6 @@ const TOKEN_REFRESH_BUFFER_MS =
 // ============================================================
 
 let accessToken = null;
-
 let accessTokenExpiresAt = 0;
 
 // ============================================================
@@ -217,9 +216,18 @@ async function getFlutterwaveAccessToken(
     return accessToken;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE OAUTH ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE OAUTH ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw new Error(
@@ -267,6 +275,10 @@ async function flutterwaveRequest({
   let token =
     await getFlutterwaveAccessToken();
 
+  const finalTraceId =
+    traceId ||
+    generateTraceId();
+
   const headers = {
     Authorization:
       `Bearer ${token}`,
@@ -278,8 +290,7 @@ async function flutterwaveRequest({
       "application/json",
 
     "X-Trace-Id":
-      traceId ||
-      generateTraceId(),
+      finalTraceId,
   };
 
   if (idempotencyKey) {
@@ -453,9 +464,18 @@ async function createFlutterwaveCustomer({
     return response.data;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE CUSTOMER CREATION ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE CUSTOMER CREATION ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw error;
@@ -569,9 +589,18 @@ async function createStaticVirtualAccount({
     return response.data;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE VIRTUAL ACCOUNT ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE VIRTUAL ACCOUNT ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw error;
@@ -608,8 +637,15 @@ async function getNigerianBanks() {
       !Array.isArray(banks)
     ) {
       console.error(
-        "FLUTTERWAVE BANK LIST INVALID RESPONSE:",
-        responseBody
+        "FLUTTERWAVE BANK LIST INVALID RESPONSE:"
+      );
+
+      console.error(
+        JSON.stringify(
+          responseBody,
+          null,
+          2
+        )
       );
 
       return [];
@@ -618,9 +654,18 @@ async function getNigerianBanks() {
     return banks;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE BANK LIST ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE BANK LIST ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw error;
@@ -705,16 +750,32 @@ async function resolveNigerianBankAccount({
       });
 
     console.log(
-      "KENT FLUTTERWAVE ACCOUNT RESOLVE RESPONSE:",
-      response?.data
+      "KENT FLUTTERWAVE ACCOUNT RESOLVE RESPONSE:"
+    );
+
+    console.log(
+      JSON.stringify(
+        response?.data,
+        null,
+        2
+      )
     );
 
     return response.data;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE ACCOUNT RESOLVE ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE ACCOUNT RESOLVE ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw error;
@@ -727,7 +788,7 @@ async function resolveNigerianBankAccount({
 //
 // POST /direct-transfers
 //
-// Exact NGN structure:
+// NGN PAYLOAD:
 //
 // {
 //   action: "instant",
@@ -759,7 +820,7 @@ async function createDirectBankTransfer({
   narration,
 }) {
   // ==========================================================
-  // REFERENCE
+  // VALIDATE REFERENCE
   // ==========================================================
 
   if (
@@ -773,7 +834,7 @@ async function createDirectBankTransfer({
   }
 
   // ==========================================================
-  // AMOUNT
+  // VALIDATE AMOUNT
   // ==========================================================
 
   const numericAmount =
@@ -791,7 +852,7 @@ async function createDirectBankTransfer({
   }
 
   // ==========================================================
-  // BANK CODE
+  // VALIDATE BANK CODE
   // ==========================================================
 
   const cleanBankCode =
@@ -810,7 +871,7 @@ async function createDirectBankTransfer({
   }
 
   // ==========================================================
-  // ACCOUNT NUMBER
+  // VALIDATE ACCOUNT NUMBER
   // ==========================================================
 
   const cleanAccountNumber =
@@ -829,7 +890,7 @@ async function createDirectBankTransfer({
   }
 
   // ==========================================================
-  // PAYLOAD
+  // BUILD TRANSFER PAYLOAD
   // ==========================================================
 
   const payload = {
@@ -874,7 +935,7 @@ async function createDirectBankTransfer({
   };
 
   // ==========================================================
-  // CALLBACK
+  // CALLBACK URL
   // ==========================================================
 
   if (
@@ -895,6 +956,10 @@ async function createDirectBankTransfer({
     generateTraceId(
       "kent-transfer"
     );
+
+  // ==========================================================
+  // LOG REQUEST
+  // ==========================================================
 
   console.log(
     "============================================================"
@@ -940,7 +1005,10 @@ async function createDirectBankTransfer({
   );
 
   console.log(
-    "PAYLOAD:",
+    "PAYLOAD:"
+  );
+
+  console.log(
     JSON.stringify(
       payload,
       null,
@@ -951,6 +1019,10 @@ async function createDirectBankTransfer({
   console.log(
     "============================================================"
   );
+
+  // ==========================================================
+  // SEND TRANSFER
+  // ==========================================================
 
   try {
     const response =
@@ -969,6 +1041,10 @@ async function createDirectBankTransfer({
         traceId,
       });
 
+    // ========================================================
+    // SUCCESS
+    // ========================================================
+
     console.log(
       "============================================================"
     );
@@ -983,7 +1059,10 @@ async function createDirectBankTransfer({
     );
 
     console.log(
-      "RESPONSE:",
+      "RESPONSE:"
+    );
+
+    console.log(
       JSON.stringify(
         response?.data,
         null,
@@ -998,15 +1077,20 @@ async function createDirectBankTransfer({
     return response.data;
   } catch (error) {
     // ========================================================
-    // IMPORTANT:
-    // NEVER hide Flutterwave's actual response.
+    // CAPTURE COMPLETE PROVIDER ERROR
     // ========================================================
 
     const status =
-      error.response?.status;
+      error.response?.status ||
+      null;
 
     const responseData =
-      error.response?.data;
+      error.response?.data ||
+      null;
+
+    // ========================================================
+    // PRINT EVERYTHING USEFUL
+    // ========================================================
 
     console.error(
       "============================================================"
@@ -1018,12 +1102,7 @@ async function createDirectBankTransfer({
 
     console.error(
       "HTTP STATUS:",
-      status || "NO_HTTP_STATUS"
-    );
-
-    console.error(
-      "TRACE ID:",
-      traceId
+      status
     );
 
     console.error(
@@ -1032,12 +1111,25 @@ async function createDirectBankTransfer({
     );
 
     console.error(
-      "URL:",
+      "TRACE ID:",
+      traceId
+    );
+
+    console.error(
+      "BASE URL:",
+      FLW_BASE_URL
+    );
+
+    console.error(
+      "ENDPOINT:",
       `${FLW_BASE_URL}/direct-transfers`
     );
 
     console.error(
-      "FLUTTERWAVE RESPONSE:",
+      "FLUTTERWAVE RESPONSE:"
+    );
+
+    console.error(
       JSON.stringify(
         responseData,
         null,
@@ -1046,7 +1138,10 @@ async function createDirectBankTransfer({
     );
 
     console.error(
-      "AXIOS ERROR:",
+      "AXIOS ERROR:"
+    );
+
+    console.error(
       error.message
     );
 
@@ -1055,15 +1150,56 @@ async function createDirectBankTransfer({
     );
 
     // ========================================================
-    // Return a useful error to the controller/service.
+    // EXTRACT PROVIDER MESSAGE SAFELY
     // ========================================================
 
-    const providerMessage =
-      responseData?.message ||
-      responseData?.error ||
-      responseData?.data?.message ||
-      error.message ||
-      "Flutterwave transfer request failed.";
+    let providerMessage =
+      null;
+
+    if (
+      typeof responseData ===
+      "string"
+    ) {
+      providerMessage =
+        responseData;
+    }
+
+    if (
+      responseData &&
+      typeof responseData ===
+        "object"
+    ) {
+      providerMessage =
+        responseData.message ||
+        responseData.error ||
+        responseData.status ||
+        null;
+
+      if (
+        providerMessage &&
+        typeof providerMessage ===
+          "object"
+      ) {
+        providerMessage =
+          JSON.stringify(
+            providerMessage,
+            null,
+            2
+          );
+      }
+    }
+
+    if (
+      !providerMessage
+    ) {
+      providerMessage =
+        error.message ||
+        "Flutterwave transfer request failed.";
+    }
+
+    // ========================================================
+    // CREATE PROVIDER ERROR
+    // ========================================================
 
     const providerError =
       new Error(
@@ -1071,13 +1207,17 @@ async function createDirectBankTransfer({
       );
 
     providerError.providerStatus =
-      status || null;
+      status;
 
     providerError.providerResponse =
-      responseData || null;
+      responseData;
 
     providerError.traceId =
       traceId;
+
+    // ========================================================
+    // THROW
+    // ========================================================
 
     throw providerError;
   }
@@ -1114,7 +1254,10 @@ async function getDirectTransferStatus(
       });
 
     console.log(
-      "KENT FLUTTERWAVE TRANSFER STATUS RESPONSE:",
+      "KENT FLUTTERWAVE TRANSFER STATUS RESPONSE:"
+    );
+
+    console.log(
       JSON.stringify(
         response?.data,
         null,
@@ -1125,9 +1268,18 @@ async function getDirectTransferStatus(
     return response.data;
   } catch (error) {
     console.error(
-      "FLUTTERWAVE TRANSFER STATUS ERROR:",
-      error.response?.data ||
-        error.message
+      "FLUTTERWAVE TRANSFER STATUS ERROR:"
+    );
+
+    console.error(
+      JSON.stringify(
+        error.response?.data || {
+          message:
+            error.message,
+        },
+        null,
+        2
+      )
     );
 
     throw error;
