@@ -32,7 +32,10 @@ const TRANSFER_FEE = Number(
   process.env.KENT_TRANSFER_FEE || 0
 );
 
-// PIN security
+// ============================================================
+// PIN SECURITY
+// ============================================================
+
 const PIN_LENGTH = 4;
 
 const MAX_PIN_ATTEMPTS = 5;
@@ -58,48 +61,56 @@ function getTransferPinRef(uid) {
 // ============================================================
 
 function validBankCode(value) {
-  return /^\d{3,6}$/.test(String(value || "").trim());
+  return /^\d{3,6}$/.test(
+    String(value || "").trim()
+  );
 }
 
 function validAccountNumber(value) {
-  return /^\d{10}$/.test(String(value || "").trim());
+  return /^\d{10}$/.test(
+    String(value || "").trim()
+  );
 }
 
 function validAmount(value) {
   const amount = Number(value);
 
-  return Number.isFinite(amount) && amount > 0;
+  return (
+    Number.isFinite(amount) &&
+    amount > 0
+  );
 }
 
 function validPin(pin) {
-  return /^\d{4}$/.test(String(pin || ""));
+  return /^\d{4}$/.test(
+    String(pin || "")
+  );
 }
 
 // ============================================================
 // GENERATE TRANSFER REFERENCE
 // ============================================================
 //
-// Flutterwave requires the transfer reference to:
-// - contain only letters, numbers, and hyphens
-// - be between 6 and 42 characters
+// Flutterwave requires:
+// - 6 to 42 characters
+// - letters, numbers and hyphens only
 //
 // Example:
 // KENT-TR-A81F92C4D7
-//
-// This format is always valid and comfortably below 42 chars.
 // ============================================================
 
 function generateTransferReference() {
-  const randomPart = crypto
-    .randomBytes(6)
-    .toString("hex")
-    .toUpperCase();
+  const randomPart =
+    crypto
+      .randomBytes(6)
+      .toString("hex")
+      .toUpperCase();
 
   return `KENT-TR-${randomPart}`;
 }
 
 // ============================================================
-// HASH PIN
+// HASH TRANSFER PIN
 // ============================================================
 
 async function hashTransferPin(pin) {
@@ -109,30 +120,37 @@ async function hashTransferPin(pin) {
     );
   }
 
-  const salt = crypto.randomBytes(16);
+  const salt =
+    crypto.randomBytes(16);
 
-  const derivedKey = await scryptAsync(
-    String(pin),
-    salt,
-    64
-  );
+  const derivedKey =
+    await scryptAsync(
+      String(pin),
+      salt,
+      64
+    );
 
   return {
     algorithm: "scrypt",
 
-    salt: salt.toString("base64"),
+    salt:
+      salt.toString("base64"),
 
-    hash: derivedKey.toString("base64"),
+    hash:
+      derivedKey.toString("base64"),
 
     version: 1,
   };
 }
 
 // ============================================================
-// VERIFY HASH
+// VERIFY TRANSFER PIN HASH
 // ============================================================
 
-async function verifyTransferPinHash(pin, storedPin) {
+async function verifyTransferPinHash(
+  pin,
+  storedPin
+) {
   if (
     !validPin(pin) ||
     !storedPin ||
@@ -143,21 +161,24 @@ async function verifyTransferPinHash(pin, storedPin) {
   }
 
   try {
-    const salt = Buffer.from(
-      storedPin.salt,
-      "base64"
-    );
+    const salt =
+      Buffer.from(
+        storedPin.salt,
+        "base64"
+      );
 
-    const expectedHash = Buffer.from(
-      storedPin.hash,
-      "base64"
-    );
+    const expectedHash =
+      Buffer.from(
+        storedPin.hash,
+        "base64"
+      );
 
-    const derivedKey = await scryptAsync(
-      String(pin),
-      salt,
-      expectedHash.length
-    );
+    const derivedKey =
+      await scryptAsync(
+        String(pin),
+        salt,
+        expectedHash.length
+      );
 
     if (
       derivedKey.length !==
@@ -223,11 +244,9 @@ async function createTransferPin({
     version:
       securePin.version,
 
-    failedAttempts:
-      0,
+    failedAttempts: 0,
 
-    lockedUntil:
-      null,
+    lockedUntil: null,
 
     createdAt:
       new Date(),
@@ -268,7 +287,10 @@ async function changeTransferPin({
     );
   }
 
-  if (currentPin === newPin) {
+  if (
+    currentPin ===
+    newPin
+  ) {
     throw new Error(
       "New transfer PIN must be different from your current PIN."
     );
@@ -316,8 +338,7 @@ async function changeTransferPin({
 
   if (!matches) {
     await recordFailedPinAttempt(
-      pinRef,
-      stored
+      pinRef
     );
 
     throw new Error(
@@ -344,11 +365,9 @@ async function changeTransferPin({
       version:
         securePin.version,
 
-      failedAttempts:
-        0,
+      failedAttempts: 0,
 
-      lockedUntil:
-        null,
+      lockedUntil: null,
 
       updatedAt:
         new Date(),
@@ -368,8 +387,7 @@ async function changeTransferPin({
 // ============================================================
 
 async function recordFailedPinAttempt(
-  pinRef,
-  currentData
+  pinRef
 ) {
   await db.runTransaction(
     async (transaction) => {
@@ -393,7 +411,7 @@ async function recordFailedPinAttempt(
       const nextAttempts =
         currentAttempts + 1;
 
-      const lock =
+      const shouldLock =
         nextAttempts >=
         MAX_PIN_ATTEMPTS;
 
@@ -404,7 +422,7 @@ async function recordFailedPinAttempt(
             nextAttempts,
 
           lockedUntil:
-            lock
+            shouldLock
               ? new Date(
                   Date.now() +
                     PIN_LOCKOUT_MS
@@ -504,8 +522,7 @@ async function verifyTransferPin({
 
   if (!matches) {
     await recordFailedPinAttempt(
-      pinRef,
-      stored
+      pinRef
     );
 
     const attempts =
@@ -545,10 +562,12 @@ async function verifyTransferPin({
 }
 
 // ============================================================
-// CHECK PIN STATUS
+// CHECK TRANSFER PIN STATUS
 // ============================================================
 
-async function getTransferPinStatus(uid) {
+async function getTransferPinStatus(
+  uid
+) {
   if (!uid) {
     throw new Error(
       "User ID is required."
@@ -556,13 +575,15 @@ async function getTransferPinStatus(uid) {
   }
 
   const snapshot =
-    await getTransferPinRef(uid).get();
+    await getTransferPinRef(
+      uid
+    ).get();
 
   if (!snapshot.exists) {
     return {
       pinSet: false,
-
       locked: false,
+      lockedUntil: null,
     };
   }
 
@@ -712,7 +733,9 @@ async function resolveBankAccount({
     const providerError =
       new Error(
         providerMessage
-          ? String(providerMessage)
+          ? String(
+              providerMessage
+            )
           : error.message ||
             "Unable to verify this bank account."
       );
@@ -746,7 +769,7 @@ async function createKentTransfer({
   }
 
   // ==========================================================
-  // VERIFY KENT TRANSACTION PIN FIRST
+  // VERIFY PIN FIRST
   // ==========================================================
 
   await verifyTransferPin({
@@ -758,7 +781,9 @@ async function createKentTransfer({
   // VALIDATE BANK
   // ==========================================================
 
-  if (!validBankCode(bankCode)) {
+  if (
+    !validBankCode(bankCode)
+  ) {
     throw new Error(
       "Invalid bank code."
     );
@@ -782,7 +807,9 @@ async function createKentTransfer({
   // VALIDATE AMOUNT
   // ==========================================================
 
-  if (!validAmount(amount)) {
+  if (
+    !validAmount(amount)
+  ) {
     throw new Error(
       "Transfer amount must be greater than zero."
     );
@@ -820,7 +847,7 @@ async function createKentTransfer({
     });
 
   // ==========================================================
-  // GENERATE VALID FLUTTERWAVE REFERENCE
+  // GENERATE VALID REFERENCE
   // ==========================================================
 
   const reference =
@@ -836,7 +863,9 @@ async function createKentTransfer({
   // ==========================================================
 
   const transferRef =
-    db.collection("transfers").doc();
+    db
+      .collection("transfers")
+      .doc();
 
   const userRef =
     getUserRef(uid);
@@ -871,7 +900,8 @@ async function createKentTransfer({
 
       const bvnVerified =
         userData.bvnVerified === true ||
-        userData.bvnVerification?.verified === true;
+        userData.bvnVerification
+          ?.verified === true;
 
       // ======================================================
       // NIN
@@ -879,7 +909,8 @@ async function createKentTransfer({
 
       const ninVerified =
         userData.ninVerified === true ||
-        userData.ninVerification?.verified === true;
+        userData.ninVerification
+          ?.verified === true;
 
       if (
         !bvnVerified ||
@@ -988,6 +1019,8 @@ async function createKentTransfer({
             narration ||
             "KENT Pay transfer",
 
+          refunded: false,
+
           createdAt:
             new Date(),
 
@@ -1016,8 +1049,27 @@ async function createKentTransfer({
 
         accountNumber:
           recipient.accountNumber,
+
+        accountName:
+          recipient.accountName,
       }
     );
+
+    // ========================================================
+    // IMPORTANT
+    // ========================================================
+    //
+    // The resolved recipient account name is passed to the
+    // Flutterwave service.
+    //
+    // flutterwave.js must accept:
+    //
+    // accountName
+    //
+    // and place it inside:
+    //
+    // payment_instruction.recipient.name
+    // ========================================================
 
     const providerResponse =
       await createDirectBankTransfer({
@@ -1031,6 +1083,9 @@ async function createKentTransfer({
 
         accountNumber:
           recipient.accountNumber,
+
+        accountName:
+          recipient.accountName,
 
         narration:
           narration ||
@@ -1107,14 +1162,45 @@ async function createKentTransfer({
       recipient,
     };
   } catch (error) {
+    // ========================================================
+    // LOG PROVIDER ERROR
+    // ========================================================
+
     console.error(
       "KENT FLUTTERWAVE TRANSFER CREATION ERROR:",
       error.response?.data ||
+        error.providerResponse ||
         error.message
     );
 
     const providerStatus =
-      error.response?.status;
+      error.response?.status ||
+      error.status;
+
+    // ========================================================
+    // SAVE PROVIDER ERROR
+    // ========================================================
+
+    try {
+      await transferRef.update({
+        providerError:
+          error.message ||
+          "Flutterwave transfer request failed.",
+
+        providerResponse:
+          error.response?.data ||
+          error.providerResponse ||
+          null,
+
+        updatedAt:
+          new Date(),
+      });
+    } catch (updateError) {
+      console.error(
+        "KENT FAILED TO SAVE PROVIDER ERROR:",
+        updateError.message
+      );
+    }
 
     // ========================================================
     // DEFINITIVE FAILURE
@@ -1225,6 +1311,20 @@ async function refundFailedTransfer({
           ? userData.walletBalance
           : 0;
 
+      const refundAmount =
+        Number(amount);
+
+      if (
+        !Number.isFinite(
+          refundAmount
+        ) ||
+        refundAmount <= 0
+      ) {
+        throw new Error(
+          "Invalid refund amount."
+        );
+      }
+
       // ======================================================
       // REFUND WALLET
       // ======================================================
@@ -1234,7 +1334,7 @@ async function refundFailedTransfer({
         {
           walletBalance:
             currentBalance +
-            Number(amount),
+            refundAmount,
 
           updatedAt:
             new Date(),
@@ -1259,6 +1359,9 @@ async function refundFailedTransfer({
 
           refundedAt:
             new Date(),
+
+          refundedAmount:
+            refundAmount,
 
           failureReason:
             reason,
