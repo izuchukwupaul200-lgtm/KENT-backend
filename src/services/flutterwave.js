@@ -61,6 +61,40 @@ let accessToken = null;
 let accessTokenExpiresAt = 0;
 
 // ============================================================
+// BANK CODE VALIDATION
+// ============================================================
+//
+// Flutterwave's Nigerian bank list can contain both:
+//
+// 3-digit traditional bank codes
+// and
+// longer codes used by some fintech/MFB institutions.
+//
+// Examples:
+//
+// 011
+// 044
+// 058
+// 090551
+// 090567
+//
+// KENT receives the bank code directly from the Flutterwave
+// bank list, so we allow numeric bank codes from 3 to 6 digits.
+//
+// IMPORTANT:
+// Do NOT replace or manually remap these codes.
+// Flutterwave's bank-list response is the source of truth.
+// ============================================================
+
+function validNigerianBankCode(
+  value
+) {
+  return /^\d{3,6}$/.test(
+    String(value || "").trim()
+  );
+}
+
+// ============================================================
 // VALIDATE CONFIGURATION
 // ============================================================
 
@@ -570,9 +604,7 @@ async function createStaticVirtualAccount({
 //   ]
 // }
 //
-// IMPORTANT:
 // This function returns ONLY the bank array.
-// transferService.js expects an array.
 // ============================================================
 
 async function getNigerianBanks() {
@@ -625,6 +657,13 @@ async function getNigerianBanks() {
 // ============================================================
 //
 // POST /banks/account-resolve
+//
+// IMPORTANT:
+// The bank code comes directly from the Flutterwave
+// Nigerian bank list.
+//
+// Both 3-digit and extended numeric Nigerian bank codes
+// are supported.
 // ============================================================
 
 async function resolveNigerianBankAccount({
@@ -642,7 +681,7 @@ async function resolveNigerianBankAccount({
     ).trim();
 
   if (
-    !/^\d{3}$/.test(
+    !validNigerianBankCode(
       cleanBankCode
     )
   ) {
@@ -662,6 +701,17 @@ async function resolveNigerianBankAccount({
   }
 
   try {
+    console.log(
+      "KENT FLUTTERWAVE ACCOUNT RESOLVE:",
+      {
+        bankCode:
+          cleanBankCode,
+
+        accountNumber:
+          cleanAccountNumber,
+      }
+    );
+
     const response =
       await flutterwaveRequest({
         method:
@@ -689,6 +739,11 @@ async function resolveNigerianBankAccount({
           ),
       });
 
+    console.log(
+      "KENT FLUTTERWAVE ACCOUNT RESOLVE RESPONSE:",
+      response?.data
+    );
+
     return response.data;
   } catch (error) {
     console.error(
@@ -707,7 +762,7 @@ async function resolveNigerianBankAccount({
 //
 // POST /direct-transfers
 //
-// Flutterwave v4 direct transfer flow.
+// Flutterwave V4 direct transfer flow.
 // ============================================================
 
 async function createDirectBankTransfer({
@@ -752,9 +807,14 @@ async function createDirectBankTransfer({
     );
   }
 
+  const cleanBankCode =
+    String(
+      bankCode || ""
+    ).trim();
+
   if (
-    !/^\d{3}$/.test(
-      String(bankCode || "")
+    !validNigerianBankCode(
+      cleanBankCode
     )
   ) {
     throw new Error(
@@ -762,9 +822,14 @@ async function createDirectBankTransfer({
     );
   }
 
+  const cleanAccountNumber =
+    String(
+      accountNumber || ""
+    ).trim();
+
   if (
     !/^\d{10}$/.test(
-      String(accountNumber || "")
+      cleanAccountNumber
     )
   ) {
     throw new Error(
@@ -800,14 +865,10 @@ async function createDirectBankTransfer({
       recipient: {
         bank: {
           account_number:
-            String(
-              accountNumber
-            ),
+            cleanAccountNumber,
 
           code:
-            String(
-              bankCode
-            ),
+            cleanBankCode,
         },
       },
 
