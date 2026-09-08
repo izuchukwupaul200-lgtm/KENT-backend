@@ -18,7 +18,7 @@ const axios = require("axios");
 // FLW_TRANSFER_WEBHOOK_URL=YOUR_WEBHOOK_URL
 //
 // NEVER put Flutterwave credentials in this file.
-// NEVER expose them to Flutter/Android.
+// NEVER expose Flutterwave credentials to Flutter.
 // ============================================================
 
 // ============================================================
@@ -63,39 +63,38 @@ let accessTokenExpiresAt = 0;
 // ============================================================
 // BANK CODE VALIDATION
 // ============================================================
-//
-// Flutterwave's Nigerian bank list can contain both:
-//
-// 3-digit traditional bank codes
-// and
-// longer codes used by some fintech/MFB institutions.
-//
-// Examples:
-//
-// 011
-// 044
-// 058
-// 090551
-// 090567
-//
-// KENT receives the bank code directly from the Flutterwave
-// bank list, so we allow numeric bank codes from 3 to 6 digits.
-//
-// IMPORTANT:
-// Do NOT replace or manually remap these codes.
-// Flutterwave's bank-list response is the source of truth.
-// ============================================================
 
-function validNigerianBankCode(
-  value
-) {
+function validNigerianBankCode(value) {
   return /^\d{3,6}$/.test(
     String(value || "").trim()
   );
 }
 
 // ============================================================
-// VALIDATE CONFIGURATION
+// ACCOUNT NUMBER VALIDATION
+// ============================================================
+
+function validNigerianAccountNumber(value) {
+  return /^\d{10}$/.test(
+    String(value || "").trim()
+  );
+}
+
+// ============================================================
+// TRANSFER REFERENCE VALIDATION
+// ============================================================
+
+function validTransferReference(reference) {
+  return (
+    typeof reference === "string" &&
+    reference.length >= 6 &&
+    reference.length <= 42 &&
+    /^[a-zA-Z0-9-]+$/.test(reference)
+  );
+}
+
+// ============================================================
+// CONFIGURATION VALIDATION
 // ============================================================
 
 function validateConfiguration() {
@@ -494,11 +493,7 @@ async function createStaticVirtualAccount({
   }
 
   if (
-    reference.length < 6 ||
-    reference.length > 42 ||
-    !/^[a-zA-Z0-9-]+$/.test(
-      reference
-    )
+    !validTransferReference(reference)
   ) {
     throw new Error(
       "Virtual account reference must contain 6-42 letters, numbers, or hyphens."
@@ -575,7 +570,6 @@ async function createStaticVirtualAccount({
   } catch (error) {
     console.error(
       "FLUTTERWAVE VIRTUAL ACCOUNT ERROR:",
-
       error.response?.data ||
         error.message
     );
@@ -586,25 +580,6 @@ async function createStaticVirtualAccount({
 
 // ============================================================
 // GET NIGERIAN BANKS
-// ============================================================
-//
-// GET /banks?country=NG
-//
-// Flutterwave V4 returns:
-//
-// {
-//   "status": "success",
-//   "message": "...",
-//   "data": [
-//     {
-//       "id": "bnk_...",
-//       "code": "044",
-//       "name": "Access Bank"
-//     }
-//   ]
-// }
-//
-// This function returns ONLY the bank array.
 // ============================================================
 
 async function getNigerianBanks() {
@@ -655,16 +630,6 @@ async function getNigerianBanks() {
 // ============================================================
 // RESOLVE NIGERIAN BANK ACCOUNT
 // ============================================================
-//
-// POST /banks/account-resolve
-//
-// IMPORTANT:
-// The bank code comes directly from the Flutterwave
-// Nigerian bank list.
-//
-// Both 3-digit and extended numeric Nigerian bank codes
-// are supported.
-// ============================================================
 
 async function resolveNigerianBankAccount({
   bankCode,
@@ -691,7 +656,7 @@ async function resolveNigerianBankAccount({
   }
 
   if (
-    !/^\d{10}$/.test(
+    !validNigerianAccountNumber(
       cleanAccountNumber
     )
   ) {
@@ -762,7 +727,28 @@ async function resolveNigerianBankAccount({
 //
 // POST /direct-transfers
 //
-// Flutterwave V4 direct transfer flow.
+// Exact NGN structure:
+//
+// {
+//   action: "instant",
+//   type: "bank",
+//   reference: "...",
+//   narration: "...",
+//   payment_instruction: {
+//     source_currency: "NGN",
+//     destination_currency: "NGN",
+//     amount: {
+//       applies_to: "destination_currency",
+//       value: 1000
+//     },
+//     recipient: {
+//       bank: {
+//         code: "044",
+//         account_number: "0123456789"
+//       }
+//     }
+//   }
+// }
 // ============================================================
 
 async function createDirectBankTransfer({
@@ -772,19 +758,12 @@ async function createDirectBankTransfer({
   accountNumber,
   narration,
 }) {
-  if (
-    !reference ||
-    typeof reference !== "string"
-  ) {
-    throw new Error(
-      "Transfer reference is required."
-    );
-  }
+  // ==========================================================
+  // REFERENCE
+  // ==========================================================
 
   if (
-    reference.length < 6 ||
-    reference.length > 42 ||
-    !/^[a-zA-Z0-9-]+$/.test(
+    !validTransferReference(
       reference
     )
   ) {
@@ -792,6 +771,10 @@ async function createDirectBankTransfer({
       "Transfer reference must contain 6-42 letters, numbers, or hyphens."
     );
   }
+
+  // ==========================================================
+  // AMOUNT
+  // ==========================================================
 
   const numericAmount =
     Number(amount);
@@ -806,6 +789,10 @@ async function createDirectBankTransfer({
       "Transfer amount must be greater than zero."
     );
   }
+
+  // ==========================================================
+  // BANK CODE
+  // ==========================================================
 
   const cleanBankCode =
     String(
@@ -822,13 +809,17 @@ async function createDirectBankTransfer({
     );
   }
 
+  // ==========================================================
+  // ACCOUNT NUMBER
+  // ==========================================================
+
   const cleanAccountNumber =
     String(
       accountNumber || ""
     ).trim();
 
   if (
-    !/^\d{10}$/.test(
+    !validNigerianAccountNumber(
       cleanAccountNumber
     )
   ) {
@@ -837,6 +828,10 @@ async function createDirectBankTransfer({
     );
   }
 
+  // ==========================================================
+  // PAYLOAD
+  // ==========================================================
+
   const payload = {
     action:
       "instant",
@@ -844,7 +839,8 @@ async function createDirectBankTransfer({
     type:
       "bank",
 
-    reference,
+    reference:
+      reference,
 
     narration:
       narration ||
@@ -852,6 +848,9 @@ async function createDirectBankTransfer({
 
     payment_instruction: {
       source_currency:
+        "NGN",
+
+      destination_currency:
         "NGN",
 
       amount: {
@@ -864,18 +863,19 @@ async function createDirectBankTransfer({
 
       recipient: {
         bank: {
-          account_number:
-            cleanAccountNumber,
-
           code:
             cleanBankCode,
+
+          account_number:
+            cleanAccountNumber,
         },
       },
-
-      destination_currency:
-        "NGN",
     },
   };
+
+  // ==========================================================
+  // CALLBACK
+  // ==========================================================
 
   if (
     FLW_TRANSFER_WEBHOOK_URL
@@ -884,8 +884,73 @@ async function createDirectBankTransfer({
       FLW_TRANSFER_WEBHOOK_URL;
   }
 
+  // ==========================================================
+  // IDEMPOTENCY
+  // ==========================================================
+
   const idempotencyKey =
     `kent-transfer-${reference}`;
+
+  const traceId =
+    generateTraceId(
+      "kent-transfer"
+    );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "KENT FLUTTERWAVE DIRECT TRANSFER REQUEST"
+  );
+
+  console.log(
+    "TRACE ID:",
+    traceId
+  );
+
+  console.log(
+    "REFERENCE:",
+    reference
+  );
+
+  console.log(
+    "AMOUNT:",
+    numericAmount
+  );
+
+  console.log(
+    "BANK CODE:",
+    cleanBankCode
+  );
+
+  console.log(
+    "ACCOUNT NUMBER:",
+    cleanAccountNumber
+  );
+
+  console.log(
+    "BASE URL:",
+    FLW_BASE_URL
+  );
+
+  console.log(
+    "ENDPOINT:",
+    `${FLW_BASE_URL}/direct-transfers`
+  );
+
+  console.log(
+    "PAYLOAD:",
+    JSON.stringify(
+      payload,
+      null,
+      2
+    )
+  );
+
+  console.log(
+    "============================================================"
+  );
 
   try {
     const response =
@@ -901,22 +966,120 @@ async function createDirectBankTransfer({
 
         idempotencyKey,
 
-        traceId:
-          generateTraceId(
-            "kent-transfer"
-          ),
+        traceId,
       });
+
+    console.log(
+      "============================================================"
+    );
+
+    console.log(
+      "FLUTTERWAVE DIRECT TRANSFER SUCCESS"
+    );
+
+    console.log(
+      "HTTP STATUS:",
+      response?.status
+    );
+
+    console.log(
+      "RESPONSE:",
+      JSON.stringify(
+        response?.data,
+        null,
+        2
+      )
+    );
+
+    console.log(
+      "============================================================"
+    );
 
     return response.data;
   } catch (error) {
-    console.error(
-      "FLUTTERWAVE DIRECT TRANSFER ERROR:",
+    // ========================================================
+    // IMPORTANT:
+    // NEVER hide Flutterwave's actual response.
+    // ========================================================
 
-      error.response?.data ||
-        error.message
+    const status =
+      error.response?.status;
+
+    const responseData =
+      error.response?.data;
+
+    console.error(
+      "============================================================"
     );
 
-    throw error;
+    console.error(
+      "FLUTTERWAVE DIRECT TRANSFER FAILED"
+    );
+
+    console.error(
+      "HTTP STATUS:",
+      status || "NO_HTTP_STATUS"
+    );
+
+    console.error(
+      "TRACE ID:",
+      traceId
+    );
+
+    console.error(
+      "REFERENCE:",
+      reference
+    );
+
+    console.error(
+      "URL:",
+      `${FLW_BASE_URL}/direct-transfers`
+    );
+
+    console.error(
+      "FLUTTERWAVE RESPONSE:",
+      JSON.stringify(
+        responseData,
+        null,
+        2
+      )
+    );
+
+    console.error(
+      "AXIOS ERROR:",
+      error.message
+    );
+
+    console.error(
+      "============================================================"
+    );
+
+    // ========================================================
+    // Return a useful error to the controller/service.
+    // ========================================================
+
+    const providerMessage =
+      responseData?.message ||
+      responseData?.error ||
+      responseData?.data?.message ||
+      error.message ||
+      "Flutterwave transfer request failed.";
+
+    const providerError =
+      new Error(
+        `Flutterwave transfer failed: ${providerMessage}`
+      );
+
+    providerError.providerStatus =
+      status || null;
+
+    providerError.providerResponse =
+      responseData || null;
+
+    providerError.traceId =
+      traceId;
+
+    throw providerError;
   }
 }
 
@@ -927,9 +1090,7 @@ async function createDirectBankTransfer({
 async function getDirectTransferStatus(
   transferId
 ) {
-  if (
-    !transferId
-  ) {
+  if (!transferId) {
     throw new Error(
       "Flutterwave transfer ID is required."
     );
@@ -952,11 +1113,19 @@ async function getDirectTransferStatus(
           ),
       });
 
+    console.log(
+      "KENT FLUTTERWAVE TRANSFER STATUS RESPONSE:",
+      JSON.stringify(
+        response?.data,
+        null,
+        2
+      )
+    );
+
     return response.data;
   } catch (error) {
     console.error(
       "FLUTTERWAVE TRANSFER STATUS ERROR:",
-
       error.response?.data ||
         error.message
     );
