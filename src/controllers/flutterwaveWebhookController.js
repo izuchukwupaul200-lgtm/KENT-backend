@@ -1,4 +1,3 @@
-```js
 const crypto = require("crypto");
 
 const { db } = require("../../firebaseAdmin");
@@ -8,156 +7,258 @@ const {
 } = require("../services/flutterwave");
 
 // ============================================================
-// FLUTTERWAVE WEBHOOK CONTROLLER
+// FLUTTERWAVE V4 WEBHOOK CONTROLLER
 // ============================================================
 //
 // POST /api/flutterwave/webhook
 //
-// Handles Flutterwave V4 charge.completed webhooks for KENT
-// static virtual-account bank-transfer deposits.
+// Purpose:
+// 1. Receive Flutterwave webhook
+// 2. Verify Flutterwave signature
+// 3. Verify the charge directly with Flutterwave
+// 4. Find the KENT user from their virtual account
+// 5. Prevent duplicate wallet funding
+// 6. Add the payment amount to walletBalance
+// 7. Record the wallet transaction
 //
-// Flow:
+// IMPORTANT:
+// Flutterwave sends the webhook to:
+// /api/flutterwave/webhook
 //
-// Flutterwave bank transfer
-//        ↓
-// charge.completed webhook
-//        ↓
-// verify signature
-//        ↓
-// verify charge with Flutterwave
-//        ↓
-// identify KENT user
-//        ↓
-// atomically increase walletBalance
-//        ↓
-// record wallet transaction
-//
+// The raw request body must be preserved by server.js.
 // ============================================================
+
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const FLW_BASE_URL =
+  process.env.FLW_BASE_URL ||
+  "https://f4bexperience.flutterwave.com";
+
+
+// ============================================================
+// SAFE JSON LOGGING
+// ============================================================
+
+function safeJson(value) {
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (error) {
+    return "[Unable to serialize value]";
+  }
+}
 
 
 // ============================================================
 // SIGNATURE VERIFICATION
 // ============================================================
+//
+// Flutterwave V4 webhook signature:
+//
+// HMAC-SHA256
+// Base64 encoded
+//
+// Header:
+// flutterwave-signature
+//
+// Secret:
+// FLW_WEBHOOK_SECRET_HASH
+//
+// ============================================================
 
-function isValidFlutterwaveSignature(
-  rawBody,
-  signature,
-  secretHash
-) {
-  if (
-    !rawBody ||
-    !signature ||
-    !secretHash
-  ) {
+function verifyFlutterwaveSignature(req) {
+  const secret =
+    process.env.FLW_WEBHOOK_SECRET_HASH ||
+    process.env.FLW_SECRET_HASH;
+
+  const receivedSignature =
+    req.headers["flutterwave-signature"];
+
+  const rawBody =
+    req.rawBody;
+
+  if (!secret) {
+    console.error(
+      "FLUTTERWAVE WEBHOOK ERROR: FLW_WEBHOOK_SECRET_HASH is missing."
+    );
+
     return false;
   }
 
-  const expectedSignature =
-    crypto
-      .createHmac(
-        "sha256",
-        secretHash
-      )
-      .update(rawBody)
-      .digest("base64");
+  if (!receivedSignature) {
+    console.error(
+      "FLUTTERWAVE WEBHOOK ERROR: flutterwave-signature header is missing."
+    );
 
-  const received =
-    String(signature).trim();
-
-  const expected =
-    String(expectedSignature).trim();
-
-  if (
-    received.length !==
-    expected.length
-  ) {
     return false;
   }
 
-  return crypto.timingSafeEqual(
-    Buffer.from(received, "utf8"),
-    Buffer.from(expected, "utf8")
-  );
+  if (
+    typeof rawBody !== "string"
+  ) {
+    console.error(
+      "FLUTTERWAVE WEBHOOK ERROR: req.rawBody is missing."
+    );
+
+    return false;
+  }
+
+  try {
+    const expectedSignature =
+      crypto
+        .createHmac(
+          "sha256",
+          secret
+        )
+        .update(rawBody, "utf8")
+        .digest("base64");
+
+    const receivedBuffer =
+      Buffer.from(
+        String(receivedSignature),
+        "utf8"
+      );
+
+    const expectedBuffer =
+      Buffer.from(
+        expectedSignature,
+        "utf8"
+      );
+
+    if (
+      receivedBuffer.length !==
+      expectedBuffer.length
+    ) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(
+      receivedBuffer,
+      expectedBuffer
+    );
+  } catch (error) {
+    console.error(
+      "FLUTTERWAVE SIGNATURE VERIFICATION ERROR:",
+      error
+    );
+
+    return false;
+  }
 }
 
 
 // ============================================================
-// VERIFY CHARGE WITH FLUTTERWAVE
+// FLUTTERWAVE CHARGE VERIFICATION
+// ============================================================
+//
+// Never trust the webhook amount/status alone.
+//
+// We verify the charge directly with Flutterwave.
+//
+// Endpoint:
+//
+// GET /charges/{chargeId}
+//
 // ============================================================
 
-async function getFlutterwaveCharge(
+async function verifyFlutterwaveCharge(
   chargeId
 ) {
   if (!chargeId) {
     throw new Error(
-      "Flutterwave charge ID is required."
+      "Flutterwave charge ID is missing."
     );
   }
+
+  console.log(
+    "=================================================="
+  );
+
+  console.log(
+    "VERIFYING FLUTTERWAVE CHARGE"
+  );
+
+  console.log(
+    "Charge ID:",
+    chargeId
+  );
+
+  console.log(
+    "=================================================="
+  );
 
   const accessToken =
     await getFlutterwaveAccessToken();
 
-  const baseUrl =
-    (
-      process.env.FLW_BASE_URL ||
-      "https://f4bexperience.flutterwave.com"
-    ).replace(/\/+$/, "");
+  if (!accessToken) {
+    throw new Error(
+      "Unable to obtain Flutterwave access token."
+    );
+  }
+
+  // ----------------------------------------------------------
+  // IMPORTANT:
+  // Do not use a template literal here.
+  // This avoids syntax problems and safely encodes chargeId.
+  // ----------------------------------------------------------
+
+  const url =
+    FLW_BASE_URL +
+    "/charges/" +
+    encodeURIComponent(chargeId);
+
+  console.log(
+    "FLUTTERWAVE CHARGE VERIFY URL:",
+    url
+  );
+
+  const axios =
+    require("axios");
 
   const response =
-    await fetch(
-      `${baseUrl}/charges/${encodeURIComponent(
-        String(chargeId)
-      )}`,
+    await axios.get(
+      url,
       {
-        method: "GET",
-
         headers: {
+          Authorization:
+            "Bearer " +
+            accessToken,
+
           Accept:
             "application/json",
-
-          Authorization:
-            `Bearer ${accessToken}`,
         },
+
+        timeout: 30000,
       }
     );
 
-  const responseText =
-    await response.text();
+  const responseData =
+    response.data;
 
-  let responseData = {};
-
-  try {
-    responseData =
-      responseText
-        ? JSON.parse(responseText)
-        : {};
-  } catch {
-    responseData = {
-      raw: responseText,
-    };
-  }
-
-  if (!response.ok) {
-    console.error(
-      "FLUTTERWAVE CHARGE LOOKUP FAILED:",
-      {
-        status:
-          response.status,
-
-        response:
-          responseData,
-      }
-    );
-
-    throw new Error(
-      `Flutterwave charge verification failed with HTTP ${response.status}.`
-    );
-  }
-
-  return (
-    responseData?.data ||
-    null
+  console.log(
+    "FLUTTERWAVE CHARGE VERIFICATION RESPONSE:"
   );
+
+  console.log(
+    safeJson(responseData)
+  );
+
+  if (
+    !responseData ||
+    !responseData.data
+  ) {
+    throw new Error(
+      "Flutterwave charge verification returned no data."
+    );
+  }
+
+  console.log(
+    "FLUTTERWAVE CHARGE VERIFIED"
+  );
+
+  return responseData.data;
 }
 
 
@@ -169,187 +270,188 @@ function normalizeAccountNumber(
   value
 ) {
   if (
-    value === undefined ||
-    value === null
+    value === null ||
+    value === undefined
   ) {
     return null;
   }
 
-  const normalized =
-    String(value)
-      .replace(/\s+/g, "")
-      .trim();
-
-  if (
-    !/^\d{10}$/.test(
-      normalized
-    )
-  ) {
-    return null;
-  }
-
-  return normalized;
-}
-
-
-// ============================================================
-// FIND USER BY KENT VIRTUAL ACCOUNT NUMBER
-// ============================================================
-
-async function findUserByAccountNumber(
-  accountNumber
-) {
-  const normalized =
-    normalizeAccountNumber(
-      accountNumber
+  const digits =
+    String(value).replace(
+      /\D/g,
+      ""
     );
 
-  if (!normalized) {
-    return null;
-  }
-
-  const snapshot =
-    await db
-      .collection("users")
-      .where(
-        "kentPayAccount.accountNumber",
-        "==",
-        normalized
-      )
-      .limit(1)
-      .get();
-
   if (
-    snapshot.empty
+    digits.length !== 10
   ) {
     return null;
   }
 
-  const doc =
-    snapshot.docs[0];
-
-  return {
-    uid:
-      doc.id,
-
-    ref:
-      doc.ref,
-
-    data:
-      doc.data() || {},
-  };
+  return digits;
 }
 
 
 // ============================================================
-// FIND USER BY FLUTTERWAVE CUSTOMER ID
+// FIND USER BY KENT VIRTUAL ACCOUNT
+// ============================================================
+//
+// Primary match:
+// users/{uid}.kentPayAccount.accountNumber
+//
+// Secondary identifiers are also checked for compatibility.
 // ============================================================
 
-async function findUserByFlutterwaveCustomerId(
-  customerId
+async function findUserByPayment(
+  {
+    accountNumber,
+    customerId,
+    virtualAccountId,
+  }
 ) {
-  if (
-    customerId === undefined ||
-    customerId === null
-  ) {
-    return null;
+  console.log(
+    "=================================================="
+  );
+
+  console.log(
+    "SEARCHING FOR KENT USER"
+  );
+
+  console.log(
+    "Account Number:",
+    accountNumber
+      ? accountNumber
+      : "none"
+  );
+
+  console.log(
+    "Customer ID:",
+    customerId
+      ? customerId
+      : "none"
+  );
+
+  console.log(
+    "Virtual Account ID:",
+    virtualAccountId
+      ? virtualAccountId
+      : "none"
+  );
+
+  console.log(
+    "=================================================="
+  );
+
+  // ----------------------------------------------------------
+  // 1. PRIMARY:
+  // kentPayAccount.accountNumber
+  // ----------------------------------------------------------
+
+  if (accountNumber) {
+    const snapshot =
+      await db
+        .collection("users")
+        .where(
+          "kentPayAccount.accountNumber",
+          "==",
+          accountNumber
+        )
+        .limit(1)
+        .get();
+
+    if (
+      !snapshot.empty
+    ) {
+      return snapshot.docs[0];
+    }
   }
 
-  const normalized =
-    String(customerId).trim();
+  // ----------------------------------------------------------
+  // 2. Flutterwave customer ID
+  // ----------------------------------------------------------
 
-  if (!normalized) {
-    return null;
+  if (customerId) {
+    const snapshot =
+      await db
+        .collection("users")
+        .where(
+          "kentPayAccount.providerCustomerId",
+          "==",
+          customerId
+        )
+        .limit(1)
+        .get();
+
+    if (
+      !snapshot.empty
+    ) {
+      return snapshot.docs[0];
+    }
+
+    // --------------------------------------------------------
+    // Legacy field
+    // --------------------------------------------------------
+
+    const legacySnapshot =
+      await db
+        .collection("users")
+        .where(
+          "kentPayFlutterwaveCustomerId",
+          "==",
+          customerId
+        )
+        .limit(1)
+        .get();
+
+    if (
+      !legacySnapshot.empty
+    ) {
+      return legacySnapshot.docs[0];
+    }
+
+    // --------------------------------------------------------
+    // Older legacy field
+    // --------------------------------------------------------
+
+    const oldSnapshot =
+      await db
+        .collection("users")
+        .where(
+          "kentPayAccount.customerId",
+          "==",
+          customerId
+        )
+        .limit(1)
+        .get();
+
+    if (
+      !oldSnapshot.empty
+    ) {
+      return oldSnapshot.docs[0];
+    }
   }
 
-  // Current KENT field
-  let snapshot =
-    await db
-      .collection("users")
-      .where(
-        "kentPayAccount.providerCustomerId",
-        "==",
-        normalized
-      )
-      .limit(1)
-      .get();
+  // ----------------------------------------------------------
+  // 3. Virtual account ID
+  // ----------------------------------------------------------
 
-  if (
-    !snapshot.empty
-  ) {
-    const doc =
-      snapshot.docs[0];
+  if (virtualAccountId) {
+    const snapshot =
+      await db
+        .collection("users")
+        .where(
+          "kentPayAccount.providerAccountId",
+          "==",
+          virtualAccountId
+        )
+        .limit(1)
+        .get();
 
-    return {
-      uid:
-        doc.id,
-
-      ref:
-        doc.ref,
-
-      data:
-        doc.data() || {},
-    };
-  }
-
-  // Top-level fallback
-  snapshot =
-    await db
-      .collection("users")
-      .where(
-        "kentPayFlutterwaveCustomerId",
-        "==",
-        normalized
-      )
-      .limit(1)
-      .get();
-
-  if (
-    !snapshot.empty
-  ) {
-    const doc =
-      snapshot.docs[0];
-
-    return {
-      uid:
-        doc.id,
-
-      ref:
-        doc.ref,
-
-      data:
-        doc.data() || {},
-    };
-  }
-
-  // Legacy fallback
-  snapshot =
-    await db
-      .collection("users")
-      .where(
-        "kentPayAccount.customerId",
-        "==",
-        normalized
-      )
-      .limit(1)
-      .get();
-
-  if (
-    !snapshot.empty
-  ) {
-    const doc =
-      snapshot.docs[0];
-
-    return {
-      uid:
-        doc.id,
-
-      ref:
-        doc.ref,
-
-      data:
-        doc.data() || {},
-    };
+    if (
+      !snapshot.empty
+    ) {
+      return snapshot.docs[0];
+    }
   }
 
   return null;
@@ -357,110 +459,58 @@ async function findUserByFlutterwaveCustomerId(
 
 
 // ============================================================
-// FIND USER BY FLUTTERWAVE VIRTUAL ACCOUNT ID
-// ============================================================
-
-async function findUserByVirtualAccountId(
-  virtualAccountId
-) {
-  if (
-    virtualAccountId === undefined ||
-    virtualAccountId === null
-  ) {
-    return null;
-  }
-
-  const normalized =
-    String(virtualAccountId).trim();
-
-  if (!normalized) {
-    return null;
-  }
-
-  const snapshot =
-    await db
-      .collection("users")
-      .where(
-        "kentPayAccount.providerAccountId",
-        "==",
-        normalized
-      )
-      .limit(1)
-      .get();
-
-  if (
-    snapshot.empty
-  ) {
-    return null;
-  }
-
-  const doc =
-    snapshot.docs[0];
-
-  return {
-    uid:
-      doc.id,
-
-    ref:
-      doc.ref,
-
-    data:
-      doc.data() || {},
-  };
-}
-
-
-// ============================================================
-// EXTRACT VIRTUAL ACCOUNT NUMBER
-// ============================================================
-//
-// Flutterwave's virtual-account bank-transfer webhook can
-// provide the account number inside meta_data.
-//
-// Example:
-//
-// meta_data.virtualaccountnumber
-//
+// EXTRACT ACCOUNT NUMBER
 // ============================================================
 
 function extractAccountNumber(
-  payload,
-  charge
+  payload
 ) {
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
+
+  const meta =
+    payload &&
+    payload.meta
+      ? payload.meta
+      : {};
+
   const candidates = [
-    // Flutterwave V3-style virtual account webhook
-    payload?.meta_data?.virtualaccountnumber,
+    data.account_number,
 
-    payload?.meta_data?.virtual_account_number,
+    data.accountNumber,
 
-    payload?.meta_data?.account_number,
+    data.virtual_account_number,
 
-    // Other possible payload locations
-    payload?.data?.account_number,
+    data.virtualAccountNumber,
 
-    payload?.data?.virtual_account_number,
+    data.bank_account_number,
 
-    payload?.data?.account?.account_number,
+    data.bankAccountNumber,
 
-    payload?.data?.payment_entity?.account_number,
+    data.account,
 
-    payload?.data?.meta_data?.account_number,
+    data.virtual_account &&
+      data.virtual_account.account_number,
 
-    payload?.data?.meta_data
-      ?.virtual_account_number,
+    data.virtualAccount &&
+      data.virtualAccount.accountNumber,
 
-    // Charge response
-    charge?.account_number,
+    data.meta &&
+      data.meta.account_number,
 
-    charge?.virtual_account_number,
+    data.meta &&
+      data.meta.accountNumber,
 
-    charge?.payment_method
-      ?.bank_transfer
-      ?.account_number,
+    meta.account_number,
 
-    charge?.payment_method_details
-      ?.bank_transfer
-      ?.account_number,
+    meta.accountNumber,
+
+    meta.virtual_account_number,
+
+    meta.virtualAccountNumber,
   ];
 
   for (
@@ -485,26 +535,48 @@ function extractAccountNumber(
 // ============================================================
 
 function extractCustomerId(
-  payload,
-  charge
+  payload
 ) {
-  return (
-    payload?.data?.customer?.id ||
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
 
-    payload?.data?.customer_id ||
+  const customer =
+    data.customer || {};
 
-    payload?.data?.payment_method
-      ?.customer_id ||
+  const candidates = [
+    data.customer_id,
 
-    charge?.customer?.id ||
+    data.customerId,
 
-    charge?.customer_id ||
+    customer.id,
 
-    charge?.payment_method
-      ?.customer_id ||
+    customer.customer_id,
 
-    null
-  );
+    customer.customerId,
+
+    data.meta &&
+      data.meta.customer_id,
+
+    data.meta &&
+      data.meta.customerId,
+  ];
+
+  for (
+    const candidate of candidates
+  ) {
+    if (
+      candidate !== null &&
+      candidate !== undefined &&
+      String(candidate).trim() !== ""
+    ) {
+      return String(candidate);
+    }
+  }
+
+  return null;
 }
 
 
@@ -513,27 +585,43 @@ function extractCustomerId(
 // ============================================================
 
 function extractVirtualAccountId(
-  payload,
-  charge
+  payload
 ) {
-  return (
-    payload?.data?.virtual_account_id ||
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
 
-    payload?.data?.virtualAccountId ||
+  const candidates = [
+    data.virtual_account_id,
 
-    payload?.data?.account_id ||
+    data.virtualAccountId,
 
-    payload?.data?.virtual_account
-      ?.id ||
+    data.account_id,
 
-    charge?.virtual_account_id ||
+    data.accountId,
 
-    charge?.virtualAccountId ||
+    data.virtual_account &&
+      data.virtual_account.id,
 
-    charge?.account_id ||
+    data.virtualAccount &&
+      data.virtualAccount.id,
+  ];
 
-    null
-  );
+  for (
+    const candidate of candidates
+  ) {
+    if (
+      candidate !== null &&
+      candidate !== undefined &&
+      String(candidate).trim() !== ""
+    ) {
+      return String(candidate);
+    }
+  }
+
+  return null;
 }
 
 
@@ -543,47 +631,195 @@ function extractVirtualAccountId(
 
 function extractTransactionReference(
   payload,
-  charge
+  verifiedCharge
 ) {
-  return (
-    payload?.data?.reference ||
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
 
-    payload?.data?.tx_ref ||
+  const candidates = [
+    data.tx_ref,
 
-    payload?.data?.flw_ref ||
+    data.txRef,
 
-    charge?.reference ||
+    data.reference,
 
-    charge?.tx_ref ||
+    data.transaction_reference,
 
-    charge?.flw_ref ||
+    data.transactionReference,
 
-    null
-  );
+    verifiedCharge &&
+      verifiedCharge.tx_ref,
+
+    verifiedCharge &&
+      verifiedCharge.txRef,
+
+    verifiedCharge &&
+      verifiedCharge.reference,
+
+    verifiedCharge &&
+      verifiedCharge.transaction_reference,
+
+    verifiedCharge &&
+      verifiedCharge.transactionReference,
+  ];
+
+  for (
+    const candidate of candidates
+  ) {
+    if (
+      candidate !== null &&
+      candidate !== undefined &&
+      String(candidate).trim() !== ""
+    ) {
+      return String(candidate);
+    }
+  }
+
+  return null;
 }
 
 
 // ============================================================
-// EXTRACT EVENT TYPE
+// EXTRACT CHARGE ID
 // ============================================================
 
-function extractEventType(
+function extractChargeId(
   payload
 ) {
-  return (
-    payload?.type ||
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
 
-    payload?.event ||
+  const candidates = [
+    data.id,
 
-    payload?.["event.type"] ||
+    data.charge_id,
 
-    ""
-  );
+    data.chargeId,
+  ];
+
+  for (
+    const candidate of candidates
+  ) {
+    if (
+      candidate !== null &&
+      candidate !== undefined &&
+      String(candidate).trim() !== ""
+    ) {
+      return String(candidate);
+    }
+  }
+
+  return null;
 }
 
 
 // ============================================================
-// WEBHOOK HANDLER
+// EXTRACT STATUS
+// ============================================================
+
+function extractStatus(
+  payload,
+  verifiedCharge
+) {
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
+
+  const status =
+    verifiedCharge &&
+    verifiedCharge.status
+      ? verifiedCharge.status
+      : data.status;
+
+  if (
+    status === null ||
+    status === undefined
+  ) {
+    return null;
+  }
+
+  return String(status)
+    .trim()
+    .toLowerCase();
+}
+
+
+// ============================================================
+// EXTRACT AMOUNT
+// ============================================================
+
+function extractAmount(
+  payload,
+  verifiedCharge
+) {
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
+
+  const candidate =
+    verifiedCharge &&
+    verifiedCharge.amount !== undefined
+      ? verifiedCharge.amount
+      : data.amount;
+
+  const amount =
+    Number(candidate);
+
+  if (
+    !Number.isFinite(amount)
+  ) {
+    return null;
+  }
+
+  return amount;
+}
+
+
+// ============================================================
+// EXTRACT CURRENCY
+// ============================================================
+
+function extractCurrency(
+  payload,
+  verifiedCharge
+) {
+  const data =
+    payload &&
+    payload.data
+      ? payload.data
+      : {};
+
+  const candidate =
+    verifiedCharge &&
+    verifiedCharge.currency
+      ? verifiedCharge.currency
+      : data.currency;
+
+  if (
+    candidate === null ||
+    candidate === undefined
+  ) {
+    return null;
+  }
+
+  return String(candidate)
+    .trim()
+    .toUpperCase();
+}
+
+
+// ============================================================
+// WEBHOOK CONTROLLER
 // ============================================================
 
 async function handleFlutterwaveWebhook(
@@ -599,790 +835,603 @@ async function handleFlutterwaveWebhook(
   );
 
   console.log(
+    "Time:",
+    new Date().toISOString()
+  );
+
+  console.log(
+    "Method:",
+    req.method
+  );
+
+  console.log(
+    "URL:",
+    req.originalUrl
+  );
+
+  console.log(
     "=================================================="
   );
 
   try {
-    // ----------------------------------------------------------
-    // ENVIRONMENT CHECK
-    // ----------------------------------------------------------
-
-    const secretHash =
-      process.env.FLW_WEBHOOK_SECRET_HASH ||
-      process.env.FLW_SECRET_HASH ||
-      "";
-
-    const signature =
-      req.headers[
-        "flutterwave-signature"
-      ];
+    // --------------------------------------------------------
+    // WEBHOOK DIAGNOSTICS
+    // --------------------------------------------------------
 
     console.log(
-      "WEBHOOK DIAGNOSTICS:",
-      {
-        hasSecretHash:
-          Boolean(secretHash),
-
-        hasSignature:
-          Boolean(signature),
-
-        hasRawBody:
-          Boolean(req.rawBody),
-
-        contentType:
-          req.headers[
-            "content-type"
-          ],
-
-        userAgent:
-          req.headers[
-            "user-agent"
-          ],
-      }
+      "WEBHOOK DIAGNOSTICS"
     );
 
-    // ----------------------------------------------------------
-    // SECRET CHECK
-    // ----------------------------------------------------------
+    console.log(
+      "rawBody exists:",
+      typeof req.rawBody === "string"
+    );
 
-    if (!secretHash) {
-      console.error(
-        "FLUTTERWAVE WEBHOOK ERROR: SECRET HASH IS NOT CONFIGURED."
-      );
+    console.log(
+      "rawBody length:",
+      typeof req.rawBody === "string"
+        ? req.rawBody.length
+        : 0
+    );
 
-      return res.status(500).json({
-        success: false,
+    console.log(
+      "flutterwave-signature exists:",
+      Boolean(
+        req.headers[
+          "flutterwave-signature"
+        ]
+      )
+    );
 
-        message:
-          "Webhook configuration error.",
-      });
-    }
+    console.log(
+      "FLW_WEBHOOK_SECRET_HASH exists:",
+      Boolean(
+        process.env.FLW_WEBHOOK_SECRET_HASH
+      )
+    );
 
-    // ----------------------------------------------------------
-    // SIGNATURE CHECK
-    // ----------------------------------------------------------
+    console.log(
+      "FLW_BASE_URL:",
+      FLW_BASE_URL
+    );
 
-    const rawBody =
-      req.rawBody ||
-      JSON.stringify(
-        req.body || {}
-      );
+    // --------------------------------------------------------
+    // SIGNATURE
+    // --------------------------------------------------------
 
-    const validSignature =
-      isValidFlutterwaveSignature(
-        rawBody,
-        signature,
-        secretHash
+    const signatureValid =
+      verifyFlutterwaveSignature(
+        req
       );
 
     console.log(
       "WEBHOOK SIGNATURE RESULT:",
-      validSignature
+      signatureValid
         ? "VALID"
         : "INVALID"
     );
 
-    if (!validSignature) {
-      console.warn(
+    if (!signatureValid) {
+      console.error(
         "FLUTTERWAVE WEBHOOK REJECTED: INVALID SIGNATURE"
       );
 
       return res.status(401).json({
         success: false,
-
         message:
-          "Invalid webhook signature.",
+          "Invalid Flutterwave webhook signature.",
       });
     }
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // PAYLOAD
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     const payload =
       req.body || {};
 
-    const eventType =
-      extractEventType(
-        payload
-      );
-
     console.log(
-      "FLUTTERWAVE WEBHOOK RECEIVED:",
-      {
-        eventType,
-
-        webhookId:
-          payload.id ||
-          payload.webhook_id ||
-          null,
-      }
+      "FLUTTERWAVE WEBHOOK RECEIVED"
     );
 
-    // ----------------------------------------------------------
-    // SAFE DEBUG INFORMATION
-    // ----------------------------------------------------------
-    //
-    // We deliberately do NOT print the secret hash.
-    //
-    // This gives us enough information to understand exactly
-    // what Flutterwave sent.
-    //
-    // ----------------------------------------------------------
-
     console.log(
-      "FLUTTERWAVE WEBHOOK PAYMENT INFO:",
-      {
-        eventType,
-
-        chargeId:
-          payload?.data?.id ||
-          null,
-
-        amount:
-          payload?.data?.amount ||
-          null,
-
-        currency:
-          payload?.data?.currency ||
-          null,
-
+      safeJson({
+        event:
+          payload.event,
+        type:
+          payload.type,
+        id:
+          payload.id,
+        dataId:
+          payload.data &&
+          payload.data.id,
         status:
-          payload?.data?.status ||
-          null,
-
-        paymentType:
-          payload?.data?.payment_type ||
-          payload?.data?.payment_method
-            ?.type ||
-          null,
-
-        customerId:
-          payload?.data?.customer?.id ||
-          null,
-
-        reference:
-          payload?.data?.reference ||
-          payload?.data?.tx_ref ||
-          null,
-
-        virtualAccountNumber:
-          payload?.meta_data
-            ?.virtualaccountnumber ||
-          payload?.meta_data
-            ?.virtual_account_number ||
-          null,
-
-        originatorAmount:
-          payload?.meta_data
-            ?.originatoramount ||
-          null,
-
-        originatorName:
-          payload?.meta_data
-            ?.originatorname ||
-          null,
-
-        eventTypeMeta:
-          payload?.["event.type"] ||
-          null,
-      }
+          payload.data &&
+          payload.data.status,
+      })
     );
 
-    // ----------------------------------------------------------
-    // ONLY PROCESS PAYMENT WEBHOOK
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // EVENT TYPE
+    // --------------------------------------------------------
+
+    const eventType =
+      String(
+        payload.type ||
+        payload.event ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    console.log(
+      "FLUTTERWAVE EVENT TYPE:",
+      eventType
+    );
+
+    // --------------------------------------------------------
+    // ONLY PROCESS CHARGE.COMPLETED
+    // --------------------------------------------------------
 
     if (
       eventType !==
       "charge.completed"
     ) {
       console.log(
-        "FLUTTERWAVE WEBHOOK IGNORED:",
-        {
-          eventType,
-        }
+        "Ignoring unsupported Flutterwave event:",
+        eventType
       );
 
       return res.status(200).json({
         success: true,
-
-        ignored: true,
-
         message:
-          "Flutterwave event acknowledged.",
+          "Event received but not processed.",
       });
     }
 
-    // ----------------------------------------------------------
-    // WEBHOOK DATA
-    // ----------------------------------------------------------
-
-    const webhookData =
-      payload.data || {};
+    // --------------------------------------------------------
+    // CHARGE ID
+    // --------------------------------------------------------
 
     const chargeId =
-      webhookData.id;
+      extractChargeId(
+        payload
+      );
 
     if (!chargeId) {
       console.error(
-        "FLUTTERWAVE WEBHOOK ERROR: CHARGE ID MISSING."
+        "FLUTTERWAVE WEBHOOK ERROR: Charge ID is missing."
       );
 
       return res.status(400).json({
         success: false,
-
         message:
           "Charge ID is missing.",
       });
     }
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // VERIFY CHARGE
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
-    console.log(
-      "VERIFYING FLUTTERWAVE CHARGE:",
-      String(chargeId)
-    );
-
-    const charge =
-      await getFlutterwaveCharge(
+    const verifiedCharge =
+      await verifyFlutterwaveCharge(
         chargeId
       );
 
-    if (!charge) {
-      console.error(
-        "FLUTTERWAVE WEBHOOK ERROR: CHARGE VERIFICATION RETURNED NO DATA."
+    // --------------------------------------------------------
+    // PAYMENT STATUS
+    // --------------------------------------------------------
+
+    const status =
+      extractStatus(
+        payload,
+        verifiedCharge
       );
-
-      return res.status(400).json({
-        success: false,
-
-        message:
-          "Unable to verify charge.",
-      });
-    }
 
     console.log(
-      "FLUTTERWAVE CHARGE VERIFIED:",
-      {
-        chargeId:
-          String(chargeId),
-
-        status:
-          charge.status,
-
-        amount:
-          charge.amount,
-
-        currency:
-          charge.currency,
-
-        customerId:
-          charge.customer?.id ||
-          null,
-
-        reference:
-          charge.reference ||
-          null,
-
-        paymentType:
-          charge.payment_method
-            ?.type ||
-          charge.payment_type ||
-          null,
-      }
+      "VERIFIED PAYMENT STATUS:",
+      status
     );
 
-    // ----------------------------------------------------------
-    // STATUS
-    // ----------------------------------------------------------
-
-    const chargeStatus =
-      String(
-        charge.status ||
-        webhookData.status ||
-        ""
-      )
-        .trim()
-        .toLowerCase();
-
     if (
-      chargeStatus !==
-        "succeeded" &&
-      chargeStatus !==
-        "successful"
+      status !== "successful" &&
+      status !== "succeeded"
     ) {
       console.log(
-        "FLUTTERWAVE CHARGE NOT SUCCESSFUL:",
-        {
-          chargeId:
-            String(chargeId),
-
-          status:
-            chargeStatus,
-        }
+        "Ignoring unsuccessful Flutterwave charge."
       );
 
       return res.status(200).json({
         success: true,
-
-        ignored: true,
-
         message:
-          "Charge is not successful.",
+          "Charge received but payment was not successful.",
       });
     }
 
-    // ----------------------------------------------------------
-    // CURRENCY
-    // ----------------------------------------------------------
-
-    const currency =
-      String(
-        charge.currency ||
-        webhookData.currency ||
-        ""
-      )
-        .trim()
-        .toUpperCase();
-
-    if (
-      currency !==
-      "NGN"
-    ) {
-      console.warn(
-        "FLUTTERWAVE WEBHOOK: UNSUPPORTED CURRENCY:",
-        currency
-      );
-
-      return res.status(200).json({
-        success: true,
-
-        ignored: true,
-
-        message:
-          "Only NGN wallet funding is supported.",
-      });
-    }
-
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // AMOUNT
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     const amount =
-      Number(
-        charge.amount ??
-        webhookData.amount
+      extractAmount(
+        payload,
+        verifiedCharge
       );
 
+    console.log(
+      "VERIFIED PAYMENT AMOUNT:",
+      amount
+    );
+
     if (
-      !Number.isFinite(
-        amount
-      ) ||
+      amount === null ||
       amount <= 0
     ) {
       console.error(
-        "FLUTTERWAVE WEBHOOK: INVALID AMOUNT:",
-        amount
+        "FLUTTERWAVE WEBHOOK ERROR: Invalid payment amount."
       );
 
       return res.status(400).json({
         success: false,
-
         message:
-          "Invalid transaction amount.",
+          "Invalid payment amount.",
       });
     }
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
+    // CURRENCY
+    // --------------------------------------------------------
+
+    const currency =
+      extractCurrency(
+        payload,
+        verifiedCharge
+      );
+
+    console.log(
+      "VERIFIED PAYMENT CURRENCY:",
+      currency
+    );
+
+    if (
+      currency !== "NGN"
+    ) {
+      console.error(
+        "FLUTTERWAVE WEBHOOK ERROR: Unsupported currency:",
+        currency
+      );
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Unsupported payment currency.",
+      });
+    }
+
+    // --------------------------------------------------------
     // IDENTIFIERS
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     const accountNumber =
       extractAccountNumber(
-        payload,
-        charge
+        payload
       );
 
     const customerId =
       extractCustomerId(
-        payload,
-        charge
+        payload
       );
 
     const virtualAccountId =
       extractVirtualAccountId(
-        payload,
-        charge
+        payload
       );
 
     const transactionReference =
       extractTransactionReference(
         payload,
-        charge
+        verifiedCharge
       );
 
     console.log(
-      "KENT PAYMENT IDENTIFIERS:",
-      {
-        accountNumber,
-
-        customerId,
-
-        virtualAccountId,
-
-        transactionReference,
-      }
+      "=================================================="
     );
 
-    // ----------------------------------------------------------
+    console.log(
+      "KENT PAYMENT IDENTIFIERS"
+    );
+
+    console.log(
+      "Account Number:",
+      accountNumber ||
+        "none"
+    );
+
+    console.log(
+      "Customer ID:",
+      customerId ||
+        "none"
+    );
+
+    console.log(
+      "Virtual Account ID:",
+      virtualAccountId ||
+        "none"
+    );
+
+    console.log(
+      "Transaction Reference:",
+      transactionReference ||
+        "none"
+    );
+
+    console.log(
+      "Charge ID:",
+      chargeId
+    );
+
+    console.log(
+      "=================================================="
+    );
+
+    // --------------------------------------------------------
     // FIND USER
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
-    let user = null;
+    const userDoc =
+      await findUserByPayment({
+        accountNumber,
+        customerId,
+        virtualAccountId,
+      });
 
-    // 1. Virtual account number
-    if (
-      accountNumber
-    ) {
-      console.log(
-        "KENT USER LOOKUP: BY VIRTUAL ACCOUNT NUMBER",
-        accountNumber
-      );
-
-      user =
-        await findUserByAccountNumber(
-          accountNumber
-        );
-    }
-
-    // 2. Customer ID
-    if (
-      !user &&
-      customerId
-    ) {
-      console.log(
-        "KENT USER LOOKUP: BY FLUTTERWAVE CUSTOMER ID",
-        customerId
-      );
-
-      user =
-        await findUserByFlutterwaveCustomerId(
-          customerId
-        );
-    }
-
-    // 3. Virtual account ID
-    if (
-      !user &&
-      virtualAccountId
-    ) {
-      console.log(
-        "KENT USER LOOKUP: BY VIRTUAL ACCOUNT ID",
-        virtualAccountId
-      );
-
-      user =
-        await findUserByVirtualAccountId(
-          virtualAccountId
-        );
-    }
-
-    // ----------------------------------------------------------
-    // USER NOT FOUND
-    // ----------------------------------------------------------
-
-    if (!user) {
+    if (!userDoc) {
       console.error(
-        "=================================================="
+        "KENT USER NOT FOUND FOR FLUTTERWAVE PAYMENT."
       );
 
-      console.error(
-        "KENT USER NOT FOUND FOR FLUTTERWAVE PAYMENT"
-      );
-
-      console.error(
-        "=================================================="
-      );
-
-      console.error(
-        "Charge ID:",
-        chargeId
-      );
-
-      console.error(
-        "Account Number:",
-        accountNumber
-      );
-
-      console.error(
-        "Customer ID:",
-        customerId
-      );
-
-      console.error(
-        "Virtual Account ID:",
-        virtualAccountId
-      );
-
-      console.error(
-        "Reference:",
-        transactionReference
-      );
-
-      console.error(
-        "Amount:",
-        amount,
-        currency
-      );
-
-      console.error(
-        "=================================================="
-      );
-
-      return res.status(200).json({
-        success: true,
-
-        processed: false,
-
+      return res.status(404).json({
+        success: false,
         message:
-          "Payment received but KENT account could not be identified.",
+          "KENT user could not be matched to this payment.",
       });
     }
 
-    // ----------------------------------------------------------
-    // USER FOUND
-    // ----------------------------------------------------------
+    const uid =
+      userDoc.id;
 
     console.log(
       "KENT USER FOUND:",
-      {
-        uid:
-          user.uid,
-
-        accountNumber:
-          user.data
-            ?.kentPayAccount
-            ?.accountNumber ||
-          null,
-      }
+      uid
     );
 
     const userRef =
-      user.ref;
-
-    // ----------------------------------------------------------
-    // IDEMPOTENCY
-    // ----------------------------------------------------------
-
-    const transactionId =
-      String(
-        chargeId
-      );
-
-    const transactionRef =
       db
         .collection("users")
-        .doc(user.uid)
+        .doc(uid);
+
+    // --------------------------------------------------------
+    // IDEMPOTENCY
+    // --------------------------------------------------------
+    //
+    // One Flutterwave charge must only fund the wallet once.
+    //
+    // We use the Flutterwave charge ID as the unique
+    // wallet transaction document ID.
+    // --------------------------------------------------------
+
+    const walletTransactionRef =
+      userRef
         .collection(
           "walletTransactions"
         )
-        .doc(transactionId);
+        .doc(chargeId);
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // FIRESTORE TRANSACTION
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
-    const result =
-      await db.runTransaction(
-        async (
-          transaction
-        ) => {
-          const existing =
-            await transaction.get(
-              transactionRef
-            );
+    let alreadyProcessed =
+      false;
 
-          if (
-            existing.exists
-          ) {
-            return {
-              alreadyProcessed:
-                true,
-
-              walletBalance:
-                existing.data()
-                  ?.walletBalanceAfter ??
-                null,
-            };
-          }
-
-          const userSnapshot =
-            await transaction.get(
-              userRef
-            );
-
-          if (
-            !userSnapshot.exists
-          ) {
-            throw new Error(
-              "KENT user account does not exist."
-            );
-          }
-
-          const userData =
-            userSnapshot.data() ||
-            {};
-
-          const currentBalance =
-            Number(
-              userData.walletBalance
-            );
-
-          const safeCurrentBalance =
-            Number.isFinite(
-              currentBalance
-            )
-              ? currentBalance
-              : 0;
-
-          const newBalance =
-            safeCurrentBalance +
-            amount;
-
-          // ----------------------------------------------------
-          // UPDATE WALLET
-          // ----------------------------------------------------
-
-          transaction.update(
-            userRef,
-            {
-              walletBalance:
-                newBalance,
-
-              walletLastFundedAt:
-                new Date(),
-
-              walletLastFundingAmount:
-                amount,
-
-              walletLastFundingCurrency:
-                currency,
-
-              walletLastFundingReference:
-                transactionReference ||
-                transactionId,
-            }
+    await db.runTransaction(
+      async (
+        transaction
+      ) => {
+        const userSnapshot =
+          await transaction.get(
+            userRef
           );
 
-          // ----------------------------------------------------
-          // RECORD TRANSACTION
-          // ----------------------------------------------------
+        if (
+          !userSnapshot.exists
+        ) {
+          throw new Error(
+            "KENT user document no longer exists."
+          );
+        }
 
-          transaction.set(
-            transactionRef,
-            {
-              type:
-                "wallet_funding",
-
-              direction:
-                "credit",
-
-              status:
-                "successful",
-
-              amount,
-
-              currency,
-
-              walletBalanceBefore:
-                safeCurrentBalance,
-
-              walletBalanceAfter:
-                newBalance,
-
-              flutterwaveChargeId:
-                transactionId,
-
-              flutterwaveReference:
-                transactionReference ||
-                null,
-
-              flutterwaveCustomerId:
-                customerId
-                  ? String(
-                      customerId
-                    )
-                  : null,
-
-              flutterwaveVirtualAccountId:
-                virtualAccountId
-                  ? String(
-                      virtualAccountId
-                    )
-                  : null,
-
-              virtualAccountNumber:
-                accountNumber ||
-                null,
-
-              provider:
-                "flutterwave",
-
-              createdAt:
-                new Date(),
-            }
+        const transactionSnapshot =
+          await transaction.get(
+            walletTransactionRef
           );
 
-          return {
-            alreadyProcessed:
-              false,
+        // ----------------------------------------------------
+        // DUPLICATE WEBHOOK
+        // ----------------------------------------------------
 
+        if (
+          transactionSnapshot.exists
+        ) {
+          alreadyProcessed =
+            true;
+
+          return;
+        }
+
+        const userData =
+          userSnapshot.data() || {};
+
+        // ----------------------------------------------------
+        // IMPORTANT:
+        //
+        // walletBalance is the correct KENT field.
+        //
+        // If it does not exist yet, use 0.
+        //
+        // DO NOT use "balance".
+        // DO NOT overwrite an existing wallet balance.
+        // ----------------------------------------------------
+
+        const currentBalance =
+          Number(
+            userData.walletBalance
+          );
+
+        const safeCurrentBalance =
+          Number.isFinite(
+            currentBalance
+          )
+            ? currentBalance
+            : 0;
+
+        const newBalance =
+          safeCurrentBalance +
+          amount;
+
+        console.log(
+          "KENT WALLET BALANCE CALCULATION"
+        );
+
+        console.log(
+          "Previous walletBalance:",
+          safeCurrentBalance
+        );
+
+        console.log(
+          "Incoming amount:",
+          amount
+        );
+
+        console.log(
+          "New walletBalance:",
+          newBalance
+        );
+
+        // ----------------------------------------------------
+        // UPDATE USER WALLET
+        // ----------------------------------------------------
+
+        transaction.set(
+          userRef,
+          {
             walletBalance:
               newBalance,
-          };
-        }
-      );
 
-    // ----------------------------------------------------------
-    // DUPLICATE
-    // ----------------------------------------------------------
+            walletLastFundedAt:
+              new Date(),
+
+            walletLastFundingAmount:
+              amount,
+
+            walletLastFundingCurrency:
+              currency,
+
+            walletLastFundingReference:
+              transactionReference ||
+              chargeId,
+          },
+          {
+            merge: true,
+          }
+        );
+
+        // ----------------------------------------------------
+        // RECORD TRANSACTION
+        // ----------------------------------------------------
+
+        transaction.set(
+          walletTransactionRef,
+          {
+            type:
+              "wallet_funding",
+
+            direction:
+              "credit",
+
+            status:
+              "successful",
+
+            amount:
+              amount,
+
+            currency:
+              currency,
+
+            provider:
+              "flutterwave",
+
+            providerTransactionId:
+              chargeId,
+
+            flutterwaveChargeId:
+              chargeId,
+
+            reference:
+              transactionReference ||
+              chargeId,
+
+            accountNumber:
+              accountNumber,
+
+            customerId:
+              customerId,
+
+            virtualAccountId:
+              virtualAccountId,
+
+            source:
+              "flutterwave_webhook",
+
+            createdAt:
+              new Date(),
+
+            processedAt:
+              new Date(),
+          },
+          {
+            merge: false,
+          }
+        );
+      }
+    );
+
+    // --------------------------------------------------------
+    // DUPLICATE RESPONSE
+    // --------------------------------------------------------
 
     if (
-      result.alreadyProcessed
+      alreadyProcessed
     ) {
       console.log(
-        "FLUTTERWAVE WEBHOOK: TRANSACTION ALREADY PROCESSED.",
-        {
-          uid:
-            user.uid,
-
-          chargeId:
-            transactionId,
-
-          walletBalance:
-            result.walletBalance,
-        }
+        "FLUTTERWAVE WEBHOOK ALREADY PROCESSED:",
+        chargeId
       );
 
       return res.status(200).json({
         success: true,
 
-        processed: false,
+        message:
+          "Flutterwave payment was already processed.",
 
-        alreadyProcessed:
-          true,
-
-        walletBalance:
-          result.walletBalance,
+        chargeId,
       });
     }
 
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
     // SUCCESS
-    // ----------------------------------------------------------
+    // --------------------------------------------------------
 
     console.log(
       "=================================================="
@@ -1393,12 +1442,8 @@ async function handleFlutterwaveWebhook(
     );
 
     console.log(
-      "=================================================="
-    );
-
-    console.log(
-      "UID:",
-      user.uid
+      "User:",
+      uid
     );
 
     console.log(
@@ -1408,28 +1453,9 @@ async function handleFlutterwaveWebhook(
     );
 
     console.log(
-      "Flutterwave Charge:",
-      transactionId
-    );
-
-    console.log(
-      "Flutterwave Customer:",
-      customerId
-    );
-
-    console.log(
-      "Virtual Account:",
-      accountNumber
-    );
-
-    console.log(
       "Reference:",
-      transactionReference
-    );
-
-    console.log(
-      "New Wallet Balance:",
-      result.walletBalance
+      transactionReference ||
+        chargeId
     );
 
     console.log(
@@ -1439,14 +1465,18 @@ async function handleFlutterwaveWebhook(
     return res.status(200).json({
       success: true,
 
-      processed: true,
+      message:
+        "Flutterwave payment processed successfully.",
+
+      chargeId,
+
+      reference:
+        transactionReference ||
+        chargeId,
 
       amount,
 
       currency,
-
-      walletBalance:
-        result.walletBalance,
     });
   } catch (error) {
     console.error(
@@ -1454,40 +1484,38 @@ async function handleFlutterwaveWebhook(
     );
 
     console.error(
-      "FLUTTERWAVE WEBHOOK ERROR"
+      "FLUTTERWAVE WEBHOOK PROCESSING ERROR"
     );
 
     console.error(
-      "=================================================="
+      error
     );
 
     console.error(
       "Message:",
-      error?.message ||
-        "Unknown error"
-    );
-
-    console.error(
-      "Name:",
-      error?.name ||
-        null
+      error.message
     );
 
     console.error(
       "Stack:",
-      error?.stack ||
-        null
+      error.stack
     );
 
     console.error(
       "=================================================="
     );
+
+    if (
+      res.headersSent
+    ) {
+      return;
+    }
 
     return res.status(500).json({
       success: false,
 
       message:
-        "Unable to process Flutterwave webhook.",
+        "Flutterwave webhook processing failed.",
     });
   }
 }
@@ -1500,60 +1528,3 @@ async function handleFlutterwaveWebhook(
 module.exports = {
   handleFlutterwaveWebhook,
 };
-```
-
-### Then do these 4 things
-
-1. Replace the entire contents of:
-   `src/controllers/flutterwaveWebhookController.js`
-
-2. Save it.
-
-3. Deploy the backend to Render.
-
-4. **Do not make another payment.** After deployment, use Flutterwave's **resend webhook** on the existing successful ₦200 transaction again.
-
-Then go to Render Logs.
-
-This time we should see something like:
-
-```text
-FLUTTERWAVE WEBHOOK HTTP REQUEST RECEIVED
-WEBHOOK DIAGNOSTICS: ...
-WEBHOOK SIGNATURE RESULT: VALID
-FLUTTERWAVE WEBHOOK RECEIVED: ...
-```
-
-If it says:
-
-```text
-WEBHOOK SIGNATURE RESULT: INVALID
-```
-
-we know the secret/signature is the problem.
-
-If it says:
-
-```text
-WEBHOOK SIGNATURE RESULT: VALID
-```
-
-but then:
-
-```text
-KENT USER NOT FOUND
-```
-
-we know the payment is reaching KENT but the virtual account/customer isn't being matched.
-
-If you see:
-
-```text
-KENT WALLET FUNDED SUCCESSFULLY
-```
-
-then **the ₦200 should be added to `walletBalance`**.
-
-Flutterwave's documentation specifically shows that virtual-account bank transfers generate `charge.completed` webhooks and that `data.id` should be used to verify the transaction, which is why this replacement keeps that verification flow.
-
-**One important thing:** because your Render logs already show `POST /api/flutterwave/webhook`, we don't need to change your webhook URL again. The endpoint is being reached. We are now diagnosing what happens **inside the controller**.
