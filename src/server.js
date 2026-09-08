@@ -1,3 +1,4 @@
+
 require("dotenv").config();
 
 const express = require("express");
@@ -7,6 +8,8 @@ const otpRouter = require("./routes/otp");
 const kycRouter = require("./routes/kyc");
 const kentPayRouter = require("./routes/kentPay");
 const transferRouter = require("./routes/transfers");
+const flutterwaveWebhookRouter =
+  require("./routes/flutterwaveWebhook");
 
 const app = express();
 
@@ -181,6 +184,22 @@ app.use(
 );
 
 // ============================================================
+// FLUTTERWAVE WEBHOOK API
+// ============================================================
+//
+// POST /api/flutterwave/webhook
+//
+// Used to receive incoming Flutterwave payment events
+// and process KENT wallet funding.
+//
+// ============================================================
+
+app.use(
+  "/api/flutterwave",
+  flutterwaveWebhookRouter
+);
+
+// ============================================================
 // 404
 // ============================================================
 
@@ -274,6 +293,10 @@ app.listen(
 
     console.log(
       "TRANSFER API: /api/transfers"
+    );
+
+    console.log(
+      "FLUTTERWAVE WEBHOOK: /api/flutterwave/webhook"
     );
 
     console.log(
