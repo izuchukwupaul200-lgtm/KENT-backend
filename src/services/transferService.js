@@ -61,8 +61,16 @@ function getTransferPinRef(uid) {
 // BASIC VALIDATION
 // ============================================================
 
+// Nigerian Flutterwave bank codes can be 3-digit
+// traditional bank codes or longer codes used by
+// some fintech/MFB institutions.
+//
+// Example:
+// 011    -> First Bank
+// 044    -> Access Bank
+// 090551 -> longer fintech/MFB-style code
 function validBankCode(value) {
-  return /^\d{3}$/.test(
+  return /^\d{3,6}$/.test(
     String(value || "").trim()
   );
 }
@@ -197,9 +205,6 @@ async function verifyTransferPinHash(
 
 // ============================================================
 // CREATE TRANSFER PIN
-// ============================================================
-//
-// The plaintext PIN is NEVER stored.
 // ============================================================
 
 async function createTransferPin({
@@ -505,7 +510,6 @@ async function verifyTransferPin({
     throw error;
   }
 
-  // Automatically clear an expired lock.
   if (
     lockedUntil &&
     Date.now() >= lockedUntil
@@ -551,7 +555,6 @@ async function verifyTransferPin({
     throw error;
   }
 
-  // Successful PIN verification resets failures.
   await pinRef.update({
     failedAttempts: 0,
     lockedUntil: null,
@@ -649,7 +652,15 @@ async function resolveBankAccount({
   bankCode,
   accountNumber,
 }) {
-  if (!validBankCode(bankCode)) {
+  const normalizedBankCode =
+    String(bankCode || "")
+      .trim();
+
+  const normalizedAccountNumber =
+    String(accountNumber || "")
+      .trim();
+
+  if (!validBankCode(normalizedBankCode)) {
     throw new Error(
       "Invalid bank code."
     );
@@ -657,7 +668,7 @@ async function resolveBankAccount({
 
   if (
     !validAccountNumber(
-      accountNumber
+      normalizedAccountNumber
     )
   ) {
     throw new Error(
@@ -665,41 +676,74 @@ async function resolveBankAccount({
     );
   }
 
-  const response =
-    await resolveNigerianBankAccount({
+  try {
+    const response =
+      await resolveNigerianBankAccount({
+        bankCode:
+          normalizedBankCode,
+
+        accountNumber:
+          normalizedAccountNumber,
+      });
+
+    const data =
+      response?.data || null;
+
+    if (
+      !data ||
+      !data.account_name
+    ) {
+      throw new Error(
+        "Unable to verify this bank account."
+      );
+    }
+
+    return {
       bankCode:
-        String(bankCode).trim(),
+        data.bank_code ||
+        normalizedBankCode,
 
       accountNumber:
-        String(accountNumber).trim(),
-    });
+        data.account_number ||
+        normalizedAccountNumber,
 
-  const data =
-    response?.data || null;
-
-  if (
-    !data ||
-    !data.account_name
-  ) {
-    throw new Error(
-      "Unable to verify this bank account."
+      accountName:
+        String(
+          data.account_name
+        ).trim(),
+    };
+  } catch (error) {
+    console.error(
+      "KENT ACCOUNT RESOLUTION PROVIDER ERROR:",
+      error.response?.data ||
+        error.message
     );
+
+    const providerData =
+      error.response?.data;
+
+    const providerMessage =
+      providerData?.message ||
+      providerData?.error?.message ||
+      providerData?.error ||
+      null;
+
+    const providerError =
+      new Error(
+        providerMessage
+          ? String(providerMessage)
+          : error.message ||
+            "Unable to verify this bank account."
+      );
+
+    providerError.status =
+      error.response?.status;
+
+    providerError.providerResponse =
+      providerData || null;
+
+    throw providerError;
   }
-
-  return {
-    bankCode:
-      data.bank_code ||
-      String(bankCode).trim(),
-
-    accountNumber:
-      data.account_number ||
-      String(accountNumber).trim(),
-
-    accountName:
-      String(
-        data.account_name
-      ).trim(),
-  };
 }
 
 // ============================================================
@@ -720,18 +764,10 @@ async function createKentTransfer({
     );
   }
 
-  // ==========================================================
-  // VERIFY PIN FIRST
-  // ==========================================================
-
   await verifyTransferPin({
     uid,
     pin,
   });
-
-  // ==========================================================
-  // VALIDATE TRANSFER
-  // ==========================================================
 
   if (!validBankCode(bankCode)) {
     throw new Error(
@@ -776,10 +812,6 @@ async function createKentTransfer({
     );
   }
 
-  // ==========================================================
-  // RESOLVE RECIPIENT
-  // ==========================================================
-
   const recipient =
     await resolveBankAccount({
       bankCode,
@@ -801,10 +833,6 @@ async function createKentTransfer({
     numericAmount +
     TRANSFER_FEE;
 
-  // ==========================================================
-  // ATOMIC WALLET DEBIT
-  // ==========================================================
-
   await db.runTransaction(
     async (transaction) => {
       const userSnapshot =
@@ -820,10 +848,6 @@ async function createKentTransfer({
 
       const userData =
         userSnapshot.data() || {};
-
-      // ------------------------------------------------------
-      // KYC
-      // ------------------------------------------------------
 
       const bvnVerified =
         userData.bvnVerified === true ||
@@ -842,10 +866,6 @@ async function createKentTransfer({
         );
       }
 
-      // ------------------------------------------------------
-      // KENT PAY ACCOUNT
-      // ------------------------------------------------------
-
       const kentPayAccount =
         userData.kentPayAccount ||
         null;
@@ -858,10 +878,6 @@ async function createKentTransfer({
           "Your KENT Pay account is not ready yet."
         );
       }
-
-      // ------------------------------------------------------
-      // WALLET BALANCE
-      // ------------------------------------------------------
 
       const walletBalance =
         typeof userData.walletBalance ===
@@ -882,10 +898,6 @@ async function createKentTransfer({
         walletBalance -
         totalDebit;
 
-      // ------------------------------------------------------
-      // DEBIT
-      // ------------------------------------------------------
-
       transaction.update(
         userRef,
         {
@@ -896,10 +908,6 @@ async function createKentTransfer({
             new Date(),
         }
       );
-
-      // ------------------------------------------------------
-      // CREATE TRANSFER RECORD
-      // ------------------------------------------------------
 
       transaction.set(
         transferRef,
@@ -949,10 +957,6 @@ async function createKentTransfer({
       );
     }
   );
-
-  // ==========================================================
-  // SEND TO FLUTTERWAVE
-  // ==========================================================
 
   try {
     const providerResponse =
